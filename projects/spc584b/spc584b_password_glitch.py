@@ -372,6 +372,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reset-hold-ms", type=int, default=50)
     parser.add_argument("--halt-timeout-ms", type=int, default=50)
     parser.add_argument("--block-timeout", type=float, default=2.0)
+    parser.add_argument(
+        "--correct-password",
+        action="store_true",
+        help="map where glitches disrupt a known-good password",
+    )
     parser.add_argument("--no-store", action="store_true")
     return parser.parse_args()
 
@@ -414,13 +419,68 @@ def build_grid(args: argparse.Namespace) -> list[tuple[int, int]]:
     return grid
 
 
+def map_correct_password(
+    openocd: str,
+    glitcher: PicoGlitcher,
+    password_words: tuple[int, ...],
+    grid: list[tuple[int, int]],
+    attempt_limit: int,
+    args: argparse.Namespace,
+    database: Database | None,
+) -> int:
+    started = time.monotonic()
+    for attempt, (delay, length) in enumerate(grid[:attempt_limit]):
+        with OpenOCDSession(openocd, args.adapter_speed_khz) as session:
+            session.command("poll off")
+            result = run_attempt(
+                session, glitcher, password_words, delay, length, args
+            )
+
+        rate = (attempt + 1) / max(time.monotonic() - started, 0.001)
+        print(
+            f"ATTEMPT={attempt} delay_ns={delay} length_ns={length} "
+            f"result={result.state} rate={rate:.2f}/s detail={result.detail}",
+            flush=True,
+        )
+        if database is not None:
+            database.insert(
+                attempt,
+                delay,
+                length,
+                result.color,
+                result.detail.encode(errors="replace"),
+            )
+        if result.state in {"PROBE_ERROR", "TRIGGER_TIMEOUT"}:
+            print(
+                f"CAMPAIGN_RESULT=ERROR reason={result.state}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return EXIT_ERROR
+        if result.state != "ACCESS_JUN_SET":
+            print(
+                f"CAMPAIGN_RESULT=CORRECT_PASSWORD_DISRUPTED attempt={attempt} "
+                f"delay_ns={delay} length_ns={length} result={result.state}",
+                flush=True,
+            )
+            return EXIT_ACCESS
+
+    print("CAMPAIGN_RESULT=NO_CORRECT_PASSWORD_DISRUPTION", flush=True)
+    return EXIT_NO_ACCESS
+
+
 def main() -> int:
     args = parse_args()
     database: Database | None = None
     try:
         validate_args(args)
         openocd = find_openocd()
-        password_words = wrong_password_words(read_password(args.password_file))
+        password = read_password(args.password_file)
+        password_words = (
+            struct.unpack(">8I", password)
+            if args.correct_password
+            else wrong_password_words(password)
+        )
 
         glitcher = PicoGlitcher()
         try:
@@ -457,11 +517,27 @@ def main() -> int:
                 dirname=str(SCRIPT_DIR / "databases"),
             )
 
-        print("METHOD=ONE_BIT_WRONG_PASSWORD_UPDATE_DR_GLITCH")
+        method = (
+            "CORRECT_PASSWORD_SENSITIVITY_MAP"
+            if args.correct_password
+            else "ONE_BIT_WRONG_PASSWORD_UPDATE_DR_GLITCH"
+        )
+        print(f"METHOD={method}")
         print("TRIGGER=TCK_RISING_EDGE_2_UPDATE_DR_ENTRY_REFERENCE")
         print(f"PICO_PIO_TICK_NS={tick_ns}")
         print(f"SEED={args.seed}")
         print(f"GRID_POINTS={len(grid)}")
+
+        if args.correct_password:
+            return map_correct_password(
+                openocd,
+                glitcher,
+                password_words,
+                grid,
+                attempt_limit,
+                args,
+                database,
+            )
 
         started = time.monotonic()
         with OpenOCDSession(openocd, args.adapter_speed_khz) as session:
