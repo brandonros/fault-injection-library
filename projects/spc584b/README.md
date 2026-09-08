@@ -1,12 +1,12 @@
 # SPC584B JTAG password fault experiment
 
-This experiment sends one uninterrupted 256-bit JTAG password transaction and
-uses an earlier TCK edge as the Pico Glitcher trigger. It does not pause in
-`DRPAUSE` and does not assume that entering `DRUPDATE` is the password-comparison
-event.
+This experiment sends one uninterrupted 256-bit JTAG password transaction.
+The Pico PIO counts FTDI-generated TCK rising edges and emits the crowbar pulse
+at one scope-calibrated edge. It does not pause in `DRPAUSE`, create a database,
+or start a new OpenOCD process for every attempt.
 
-The code never writes flash, UTEST, DCF, lifecycle, or OTP. It does not create a
-database; every result is printed directly to stdout.
+The code never writes flash, UTEST, DCF, lifecycle, or OTP. Every result is
+printed to stdout.
 
 ## Setup
 
@@ -15,7 +15,7 @@ database; every result is printed directly to stdout.
 - Pico `GLITCH` to the rail-side pad of the VDD_LV injection point
 - Pico `RESET` and `VTARGET` disconnected
 - Board independently powered; FTDI JTAG connected
-- Oscilloscope probes on TCK and an MCU-side VDD_LV point
+- Oscilloscope probes on TCK, Pico `GLITCH`, and an MCU-side VDD_LV point
 
 On the stock discovery board, C43 is on VDD_LV but is not isolated from Q1 or
 the remaining rail capacitance. Do not interpret a campaign until the scope
@@ -30,53 +30,78 @@ export SPC_OPENOCD=/path/to/st-automotive-openocd/src/openocd
 chmod 600 /secure/path/jtag-password.bin
 ```
 
+## Stage 0: map TCK count to the waveform
+
+Physically disconnect Pico `GLITCH` from the target rail. Keep it connected
+only to an oscilloscope channel, then run:
+
+```bash
+.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
+  --mode edge-map \
+  --rpico /dev/cu.usbmodemXXXX \
+  --password-file /secure/path/jtag-password.bin \
+  --edge-range 252 264 \
+  --confirm-glitch-disconnected
+```
+
+The safety confirmation is mandatory because this mode intentionally emits a
+marker for every requested edge. Use the TCK and marker traces to identify the
+single count whose marker begins at, or immediately before, the final
+`Update-DR` transition of the uninterrupted password scan. A
+`marker_observed=no` line means that count was not reached.
+
+The FTDI does not need to generate a separate trigger initially. The Pico PIO
+counts the FTDI TCK waveform in hardware, so the trigger is synchronous with
+the transaction. The scope measurement is what determines the exact count and
+reveals any unacceptable jitter.
+
 ## Stage 1: characterize a physical effect
 
-Start with the correct password. The script first proves, without a glitch,
-that the correct password unlocks and its one-bit-wrong variant does not. It
-then stops at the first timing point where the correct-password result changes.
+Reconnect Pico `GLITCH` to the injection point only after Stage 0. Supply the
+one measured edge count, not an edge range. The script first proves without a
+glitch that the correct password unlocks and its one-bit-wrong variant does
+not. It then faults the correct password and stops at the first changed result.
 
 ```bash
 .venv/bin/python projects/spc584b/spc584b_password_glitch.py \
   --mode characterize \
   --rpico /dev/cu.usbmodemXXXX \
   --password-file /secure/path/jtag-password.bin \
-  --edge-count 252 260 \
+  --edge-count MEASURED_EDGE \
   --delay 0 1000 \
   --length 8 28
 ```
 
 `FAULT_OBSERVED` proves only that the pulse changed target behavior. A reset,
 TAP failure, and disruption of the password check are not equivalent. Correlate
-the result with TCK and VDD_LV scope traces before narrowing the search.
-
-The edge-count range is intentionally configurable. OpenOCD adds TAP transition
-clocks around the 256 data clocks, and the Pico firmware's observed count must
-be checked on the oscilloscope rather than inferred from the number 256.
+the result with TCK and VDD_LV traces, then repeat a narrow neighborhood to
+establish that the effect is reproducible and non-destructive.
 
 ## Stage 2: attack the wrong-password path
 
-After Stage 1 establishes repeatable, non-destructive faulting near the end of
-the password transaction, search a narrow neighborhood with the one-bit-wrong
-password:
+After Stage 1 establishes a repeatable physical effect near the comparison,
+fault the one-bit-wrong password using the same calibrated edge:
 
 ```bash
 .venv/bin/python projects/spc584b/spc584b_password_glitch.py \
   --mode attack \
   --rpico /dev/cu.usbmodemXXXX \
   --password-file /secure/path/jtag-password.bin \
-  --edge-count MIN_EDGE MAX_EDGE \
+  --edge-count MEASURED_EDGE \
   --delay MIN_DELAY_NS MAX_DELAY_NS \
-  --length MIN_LENGTH_NS MAX_LENGTH_NS \
-  --attempts 1000 \
-  --repeats 10
+  --length MIN_LENGTH_NS MAX_LENGTH_NS
 ```
 
-An `ACCESS_CANDIDATE` stops immediately and leaves the target halted without an
+Attack mode defaults to at most 100,000 shuffled attempts and 100 repetitions
+per grid point. Override those with `--attempts` and `--repeats`. OpenOCD stays
+alive across attempts; the script restarts it and reruns both controls only if
+the Tcl session becomes unusable.
+
+An `ACCESS_CANDIDATE` requires a successful halt plus verified register and
+LCSTAT reads. It stops immediately and leaves the target halted without an
 additional reset. Exit codes are 0 for no candidate, 10 for a fault/access
 candidate, 2 for an experimental error, and 130 for interruption.
 
-The defaults use the low-power crowbar, 1 MHz JTAG, a shuffled 4 ns timing
-lattice, edges 252 through 260, delays from 0 through 1,000 ns, and pulse widths
-from 8 through 28 ns. Use `--high-power` only after validating the electrical
-effect and safe pulse width on an oscilloscope.
+The timing lattice defaults to 4 ns steps, delays from 0 through 1,000 ns, and
+pulse widths from 8 through 28 ns at 1 MHz JTAG. Use `--high-power` only after
+validating the electrical effect and safe pulse width on an oscilloscope.
