@@ -1,72 +1,82 @@
-# SPC584B JTAG password glitch
+# SPC584B JTAG password fault experiment
 
-Submits a one-bit-wrong JTAG password, glitches VDD_LV as the TAP enters
-`DRUPDATE`, then checks whether debug access was granted. It does not write
-flash, UTEST, DCF, lifecycle, or OTP.
+This experiment sends one uninterrupted 256-bit JTAG password transaction and
+uses an earlier TCK edge as the Pico Glitcher trigger. It does not pause in
+`DRPAUSE` and does not assume that entering `DRUPDATE` is the password-comparison
+event.
+
+The code never writes flash, UTEST, DCF, lifecycle, or OTP. It does not create a
+database; every result is printed directly to stdout.
 
 ## Setup
 
 - Pico `GND` to target `GND`
-- Pico trigger to JTAG `TCK`
+- Pico trigger input to JTAG `TCK`
 - Pico `GLITCH` to the rail-side pad of the VDD_LV injection point
 - Pico `RESET` and `VTARGET` disconnected
 - Board independently powered; FTDI JTAG connected
+- Oscilloscope probes on TCK and an MCU-side VDD_LV point
 
 On the stock discovery board, C43 is on VDD_LV but is not isolated from Q1 or
-the rest of the rail capacitance. Confirm the disturbance at an MCU-side
-VDD_LV point and the safe pulse width on an oscilloscope.
+the remaining rail capacitance. Do not interpret a campaign until the scope
+shows a repeatable disturbance at the MCU-side measurement point.
 
-## Run
+## Install
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e .
 export SPC_OPENOCD=/path/to/st-automotive-openocd/src/openocd
 chmod 600 /secure/path/jtag-password.bin
-
-.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
-  --rpico /dev/cu.usbmodemXXXX \
-  --password-file /secure/path/jtag-password.bin
 ```
 
-Defaults: 1 MHz JTAG, 50 ms reset, low-power crowbar, 0–1,000 ns delay,
-8–28 ns pulse width, and a shuffled 1,506-point grid with seed 584. Before and
-after a negative sweep, 20 correct/wrong control pairs verify that the known
-password unlocks and the one-bit-wrong password remains locked. Every password
-submission uses a fresh OpenOCD process. Use `--controls 0` to explicitly
-disable the controls.
+## Stage 1: characterize a physical effect
 
-For 100 trials at one setting:
+Start with the correct password. The script first proves, without a glitch,
+that the correct password unlocks and its one-bit-wrong variant does not. It
+then stops at the first timing point where the correct-password result changes.
 
 ```bash
 .venv/bin/python projects/spc584b/spc584b_password_glitch.py \
+  --mode characterize \
   --rpico /dev/cu.usbmodemXXXX \
   --password-file /secure/path/jtag-password.bin \
-  --delay 500 500 --length 20 20 \
-  --repeats-per-point 100 --attempts 100
+  --edge-count 252 260 \
+  --delay 0 1000 \
+  --length 8 28
 ```
 
-`--repeats-per-point N` creates distinct, seeded repeat entries. `--attempts N`
-is the desired total, not an additional count. SQLite results and a compact
-adjacent manifest go into the gitignored `projects/spc584b/databases/` directory.
-Resume by rerunning the same command and configuration with
-`--resume-database projects/spc584b/databases/RUN.sqlite --attempts N`. The
-manifest and every existing row must match the expected shuffled prefix.
+`FAULT_OBSERVED` proves only that the pulse changed target behavior. A reset,
+TAP failure, and disruption of the password check are not equivalent. Correlate
+the result with TCK and VDD_LV scope traces before narrowing the search.
 
-`--no-store` disables both files and cannot be combined with resume.
-Use `--correct-password` to map disruptions of a known-good submission.
+The edge-count range is intentionally configurable. OpenOCD adds TAP transition
+clocks around the 256 data clocks, and the Pico firmware's observed count must
+be checked on the oscilloscope rather than inferred from the number 256.
 
-## Outcomes
+## Stage 2: attack the wrong-password path
 
-- `HALT_NOT_OBSERVED`: locked; normal negative result
-- `ACCESS_*`: access candidate; stop immediately and preserve the halted target
-- `PROBE_ERROR` or `TRIGGER_TIMEOUT`: invalid attempt; stop with an error
+After Stage 1 establishes repeatable, non-destructive faulting near the end of
+the password transaction, search a narrow neighborhood with the one-bit-wrong
+password:
 
-Correct-password probes retry a 50 ms halt miss at 100, 200, 250, 300, 500,
-1,000, and 2,000 ms without resetting. A recovered `JUN=1` is recorded as
-delayed access, not a password-check disruption.
+```bash
+.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
+  --mode attack \
+  --rpico /dev/cu.usbmodemXXXX \
+  --password-file /secure/path/jtag-password.bin \
+  --edge-count MIN_EDGE MAX_EDGE \
+  --delay MIN_DELAY_NS MAX_DELAY_NS \
+  --length MIN_LENGTH_NS MAX_LENGTH_NS \
+  --attempts 1000 \
+  --repeats 10
+```
 
-Exit codes: 0 negative sweep, 10 access candidate, 2 error, 130 interrupted.
+An `ACCESS_CANDIDATE` stops immediately and leaves the target halted without an
+additional reset. Exit codes are 0 for no candidate, 10 for a fault/access
+candidate, 2 for an experimental error, and 130 for interruption.
 
-A negative sweep covers only these digital timing settings; it does not rule
-out other pulse shapes, rail conditions, or comparison timing.
+The defaults use the low-power crowbar, 1 MHz JTAG, a shuffled 4 ns timing
+lattice, edges 252 through 260, delays from 0 through 1,000 ns, and pulse widths
+from 8 through 28 ns. Use `--high-power` only after validating the electrical
+effect and safe pulse width on an oscilloscope.
