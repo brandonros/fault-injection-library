@@ -85,6 +85,14 @@ expected IDCODE after restoration, and `POWER_CYCLE_TEST_PASS`. Campaign modes
 also repeat this physical proof at startup. An `AT+CH1` USB relay remains an
 optional automation path through `--power-relay-port`.
 
+The bench acceptance run on 2026-09-12 passed. With S1 on, raw IDCODE was
+`0x20144041`; with S1 off, it became `0xffffffff`; and after S1 was restored it
+returned to `0x20144041`. Three separately cold-booted controls then produced
+correct-password `ACCESS_JUN_SET`, one-bit-wrong-password zero LCSTAT/RWCS
+data with `JUN=0`, and correct-password recovery `ACCESS_JUN_SET`. This proves
+the manual switch supplies the full reset that DCI plus nTRST/nSRST could not
+reliably provide.
+
 Do not power the SPC584B-DISP through Pico's 5 V output. The board input expects
 12 V, direct injection into its internal 5 V net would backfeed the buck
 converter, and Pico is not sized to power the complete discovery board.
