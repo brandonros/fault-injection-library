@@ -135,7 +135,7 @@ recovery in the same persistent session again returned three stable
 `LCSTAT=0xe0000002` reads with `RWCS=0x10c00005`, `JUN=1`, and no transport
 error. The complete raw harness acceptance sequence therefore passes.
 
-## What the pre-relay runs established
+## Electrical response measurements
 
 The raw 20 us authority run on 2026-09-12 changed all five correct-password
 shots from valid LCSTAT data to stable all-ones LCSTAT/RWCS data. Every shot
@@ -169,7 +169,15 @@ the immediate correct-password recovery also returned zero. The next process
 then failed its unglitched correct-password control in the same way. This is
 evidence of a wedged or incompletely reset target, not an authentication
 result. Do not use that partial CSV to claim a 1.4-2.0 us boundary. Rerun the
-map only after the relay preflight passes.
+map only after a full cold-cycle preflight passes.
+
+The manual cold-cycle endpoint map then repeated the measurement with a full
+S1 cycle before every shot. At edge 260 and delay 0, 1 us passed 2/2 with
+stable `LCSTAT=0xe0000002` and `JUN=1`; 2 us produced invalid all-ones
+LCSTAT/RWCS data 2/2, and both failures recovered after another cold cycle.
+This validates the 1-2 us electrical disruption bracket under the corrected
+reset method. The post-authentication control above still excludes the 2 us
+response as evidence of a password-comparison bypass.
 
 The recorded command was:
 
