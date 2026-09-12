@@ -1,144 +1,120 @@
 # SPC584B JTAG password fault experiment
 
-This experiment sends one uninterrupted 256-bit JTAG password transaction.
-The Pico PIO counts FTDI-generated TCK rising edges and emits the crowbar pulse
-at one scope-calibrated edge. One external FTDI and OpenOCD session remains
-alive for the campaign. Each shot applies the SPC584B destructive reset, proves
-the exact TAP IDCODE, reinitializes the FTDI reset lines and scan chain, arms the
-Pico, sends one uninterrupted password scan, and then verifies halt, live
-registers, and three stable LCSTAT reads.
+This experiment uses one persistent PyFtdi object to control the onboard
+SPC584B-DISP FTDI directly. It does not launch a debugger daemon. The Python
+code owns every JTAG state transition and implements the complete path used by
+the campaign:
 
-The code never writes flash, UTEST, DCF, lifecycle, or OTP. Every result is
-printed to stdout.
+1. assert the SPC584B DCI destructive reset to re-arm password security;
+2. cycle the FTDI-controlled nTRST/nSRST lines and reset the main TAP;
+3. require the exact raw IDCODE `0x20144041`;
+4. select JTAGC instruction `0x07`;
+5. shift one uninterrupted 256-bit password scan;
+6. enter core-2 OnCE with JTAGC instruction `0x2a`;
+7. select OnCE Nexus3 access with 10-bit command `0x07c`;
+8. read `PASS_LCSTAT` at `0xf7ff4000` three times through Nexus;
+9. report access only when all reads are stable, valid, free of a Nexus bus
+   error, and LCSTAT bit 30 (`JUN`) is set.
 
-## Setup
+No CPU halt request, process-state cache, socket, or timeout is used as an
+authorization result. The raw implementation is in `jtag_pyftdi.py`. The
+campaign is in `spc584b_password_glitch.py`.
+
+The code never writes flash, UTEST, DCF, lifecycle, or OTP.
+
+## Wiring
 
 - Pico `GND` to target `GND`
-- Pico trigger input to JTAG `TCK`
+- Pico `TRIGGER` input to JTAG `TCK`
 - Pico `GLITCH` SMA center to the VDD_LV pad of C43
-- Pico `GLITCH` SMA shield/ground to the GND pad of C43
+- Pico `GLITCH` SMA shield to the GND pad of C43
 - Pico `RESET` and `VTARGET` disconnected
-- Board independently powered; external FTDI JTAG connected
-- Oscilloscope probes on TCK, Pico `GLITCH`, and an MCU-side VDD_LV point
+- Board independently powered from its wall adapter
+- Board's onboard FTDI connected over USB
 
-On the stock discovery board, C43 is a 2.2 uF capacitor between VDD_LV and GND;
-verify its pads by continuity to TP8 and GND with power removed. C35 through C48
-place about 4.8 uF of listed capacitance on the same rail, and the Q1 pass
-transistor actively supplies it while the board is wall-powered. A Pico
-crowbar connected across C43 therefore fights both the full capacitor bank and
-the regulator. Wiring alone does not establish useful glitch authority. Do not
-interpret a nanosecond campaign until a scope shows a repeatable disturbance at
-the MCU-side measurement point or the no-scope authority gate below passes.
-
-The FTDI probe and Pico must remain powered independently of the target. The
-SPC584B DCI destructive reset re-arms password security while allowing the
-external FTDI/OpenOCD process to remain alive. The script then asks OpenOCD to
-cycle its FTDI-controlled TRST/SRST lines and reinitialize the scan chain. This
-second step is required after a locked-core halt attempt: raw IDCODE can remain
-valid while OpenOCD can no longer recover correct-password core access. Before
-every password submission, the script requires IDCODE `0x20144041`; it retries
-the reset three times and aborts instead of firing if the TAP does not recover.
-
-The per-shot order mirrors the proven MPC574X flow:
-
-1. keep the external FTDI/OpenOCD controller alive;
-2. destructively reset the target to re-arm the password check;
-3. cycle the external FTDI reset lines and reinitialize the scan chain;
-4. verify the target IDCODE, retrying reset on failure;
-5. configure and arm the Pico edge trigger;
-6. send one uninterrupted 256-bit wrong-password transaction;
-7. require a real halt and register reads, then sample LCSTAT three times.
+C43 is a capacitor, not a resistor. On the stock discovery board it is 2.2 uF
+between VDD_LV and GND. Verify the VDD_LV pad by continuity to TP8 and verify
+the other pad by continuity to ground with power removed. C35 through C48 put
+about 4.8 uF of listed capacitance on that rail, and Q1 actively supplies it
+while the board is powered. A long pulse may therefore be a broad brownout or
+reset rather than a fault in the password comparison.
 
 ## Install
 
 ```bash
+cd /Users/brandon/Desktop/mpc/fault-injection-library
 python3 -m venv .venv
 .venv/bin/pip install -e .
-export SPC_OPENOCD=/path/to/st-automotive-openocd/src/openocd
-chmod 600 /secure/path/jtag-password.bin
+chmod 600 /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin
 ```
 
-## Stage 0: map TCK count to the waveform
+The project pins PyFtdi, PyUSB, and a packaged libusb runtime. No system daemon
+or external debugger executable is required.
 
-Physically disconnect Pico `GLITCH` from the target rail. Keep it connected
-only to an oscilloscope channel, then run:
+## Mandatory raw-JTAG controls
+
+Run this before another glitch attempt:
+
+```bash
+cd /Users/brandon/Desktop/mpc/fault-injection-library
+
+.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
+  --mode controls \
+  --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin
+```
+
+This does not initialize or fire the Pico. It must show all of the following:
+
+```text
+RAW_IDCODE=0x20144041
+CONTROL password=correct result=ACCESS_JUN_SET
+CONTROL password=wrong result=<anything other than ACCESS_JUN_SET>
+EXPERIMENT_RESULT=CONTROLS_PASS
+```
+
+The correct control proves the password word order, OnCE route, Nexus
+transactions, target byte order, LCSTAT address, and JUN mask through the raw
+Python implementation. The wrong control proves that a destructive reset
+re-arms security and that one changed password bit does not set JUN. A campaign
+must not run if either control fails.
+
+The raw FTDI path has independently read the exact IDCODE on this board. Direct
+LCSTAT control validation is the remaining hardware acceptance test after the
+daemon removal.
+
+## Characterize the connected crowbar
+
+The previous 20 us test caused a repeatable changed response and recovered with
+the correct password. Repeat that authority check with the raw oracle before
+using its result:
 
 ```bash
 .venv/bin/python projects/spc584b/spc584b_password_glitch.py \
-  --mode edge-map \
-  --rpico /dev/cu.usbmodemXXXX \
-  --password-file /secure/path/jtag-password.bin \
-  --edge-range 252 264 \
-  --confirm-glitch-disconnected
-```
-
-The safety confirmation is mandatory because this mode intentionally emits a
-marker for every requested edge. Use the TCK and marker traces to identify the
-single count whose marker begins at, or immediately before, the final
-`Update-DR` transition of the uninterrupted password scan. A
-`marker_observed=no` line means that count was not reached.
-
-The FTDI does not need to generate a separate trigger initially. The Pico PIO
-counts the FTDI TCK waveform in hardware, so the trigger is synchronous with
-the transaction. The scope measurement is what determines the exact count and
-reveals any unacceptable jitter.
-
-## Stage 1: characterize a physical effect
-
-Reconnect Pico `GLITCH` to the injection point only after Stage 0. Supply the
-one measured edge count, not an edge range. The script first proves without a
-glitch that the correct password unlocks and its one-bit-wrong variant does
-not. It then faults the correct password and stops at the first changed result.
-
-```bash
-.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
-  --mode characterize \
-  --rpico /dev/cu.usbmodemXXXX \
-  --password-file /secure/path/jtag-password.bin \
-  --edge-count MEASURED_EDGE \
-  --delay 0 1000 \
-  --length 8 28 \
-  --strict-oracle
-```
-
-`FAULT_OBSERVED` proves only that the pulse changed target behavior. A reset,
-TAP failure, and disruption of the password check are not equivalent. Correlate
-the result with TCK and VDD_LV traces, then repeat a narrow neighborhood to
-establish that the effect is reproducible and non-destructive.
-
-### No-scope alternative: correct-password sensitivity map
-
-When scope calibration is intentionally skipped, map the correct-password
-pass/fail boundary before spending repetitions on the wrong-password path.
-This does not prove that VDD_LV moved, but it separates timing cells where the
-correct password remains accepted from cells where the pulse changes target
-behavior. Every completed attempt is flushed immediately to a CSV file.
-
-First prove that the connected low-power crowbar can affect this particular
-powered board. Use one deliberately long 20 us pulse with the correct password:
-
-```bash
-.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
-  --mode characterize \
+  --mode sensitivity-map \
   --rpico /dev/cu.usbmodem1301 \
   --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
   --edge-count 260 \
   --delay 0 0 \
   --length 20000 20000 \
-  --attempts 1 \
-  --repeats 1 \
-  --halt-timeout-ms 2000 \
-  --strict-oracle
+  --repeats 5 \
+  --strict-oracle \
+  --output projects/spc584b/run-artifacts/raw-authority-lp-20us-repeat5.csv
 ```
 
-`ACCESS_JUN_SET` means the crowbar has not demonstrated authority even at this
-long width; stop rather than run the timing map. A changed result followed by
-`POST_SHOT_RECOVERY=PASS` establishes a detectable electrical effect, after
-which widths can be reduced to locate the pass/fail boundary. This digital gate
-still does not measure the shape or depth of a nanosecond VDD_LV pulse.
+For every shot, strict mode first proves that a fresh destructive reset has not
+left JUN set. After every changed result it resets again and requires the
+correct password to restore stable `LCSTAT.JUN=1`. This distinguishes a
+recoverable electrical effect from persistent harness failure. It still does
+not show whether the target brownouted or whether the password comparison was
+disturbed.
 
-At 1 MHz JTAG, edge 260 is the computed `Update-DR` point for this uninterrupted
-256-bit scan. Run its complete 4 ns timing lattice with:
+## Sensitivity map
+
+At 1 MHz JTAG, edge 260 is the computed `Update-DR` neighborhood for the raw
+256-bit scan. Without a scope, first reduce pulse width until the correct
+password has both passing and changed cells. Record every attempt in a new CSV.
+Do not scan a 4 ns lattice through the full 20 us interval; narrow the width
+range with successive authority tests.
 
 ```bash
 .venv/bin/python projects/spc584b/spc584b_password_glitch.py \
@@ -146,108 +122,50 @@ At 1 MHz JTAG, edge 260 is the computed `Update-DR` point for this uninterrupted
   --rpico /dev/cu.usbmodem1301 \
   --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
   --edge-count 260 \
-  --delay 0 1000 \
-  --length 8 28 \
-  --repeats 1 \
+  --delay MIN_DELAY_NS MAX_DELAY_NS \
+  --length MIN_LENGTH_NS MAX_LENGTH_NS \
+  --step-ns 4 \
+  --repeats 5 \
   --strict-oracle \
-  --output projects/spc584b/run-artifacts/edge260-sensitivity.csv
+  --output projects/spc584b/run-artifacts/raw-edge260-sensitivity.csv
 ```
 
-The final `SENSITIVITY_BOUNDARY` lines identify changed cells directly adjacent
-to stable accepted cells. Repeat a narrower region around those cells before
-using the same region in `attack` mode. The output path must not already exist;
-the script refuses to overwrite an earlier run.
+The `SENSITIVITY_BOUNDARY` lines identify changed cells directly adjacent to
+cells where the correct password still sets JUN.
 
-`wait_halt` failure alone cannot distinguish a locked core from a core that was
-reset, crashed, or otherwise became unresponsive. Use `--strict-oracle` when
-mapping a point without a scope. Before every shot, strict mode applies the DCI
-destructive reset, verifies the exact IDCODE, proves that debug access is denied
-without a password, then applies a second destructive reset before the password
-scan. After every no-access result it resets again and requires the correct
-password to produce live registers and three stable `LCSTAT` reads with `JUN=1`.
-The run aborts instead of counting the shot if that recovery check fails.
+## Attack
 
-```bash
-.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
-  --mode sensitivity-map \
-  --rpico /dev/cu.usbmodem1301 \
-  --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
-  --edge-count 260 \
-  --delay 0 0 \
-  --length 8 8 \
-  --repeats 100 \
-  --halt-timeout-ms 2000 \
-  --strict-oracle \
-  --output projects/spc584b/run-artifacts/edge260-d0-l8-strict-repeat100.csv
-```
-
-A destructive reset is required between independent attempts because a
-successful password scan sets temporary debug authorization. Reusing that state
-would allow one accepted password to contaminate later results. The normal mode
-already resets and verifies IDCODE before every shot; strict mode adds the paired
-denial and recovery checks around it.
-
-### Invalidated direct characterization, 2026-09-12
-
-The SPC584B-DIS was tested with its onboard PLS FTDI at 1 MHz, PicoGlitcher and
-findus 1.14.1 in low-power mode, TCK edge 260, delay 0 ns, and width 8 ns. Scope
-calibration was intentionally skipped. This command was run twice:
-
-```bash
-.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
-  --mode characterize \
-  --rpico /dev/cu.usbmodem1301 \
-  --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
-  --edge-count 260 \
-  --delay 0 0 \
-  --length 8 8 \
-  --attempts 1
-```
-
-Both runs appeared to pass the controls, and a subsequent fixed-point run
-returned `LOCKED_OR_UNRESPONSIVE` for all 100 correct-password shots. Those
-results are invalid as evidence of an authentication disturbance. A strict
-recovery test showed that, after the first failed halt, DCI reset plus an IDCODE
-check did not restore correct-password access in the same OpenOCD state. A fresh
-OpenOCD process restored it immediately. IDCODE had therefore been proving only
-that the TAP remained alive while the core-debug path stayed stale.
-
-The harness now runs `jtag arp_init-reset` after DCI reset while keeping the
-OpenOCD process and FTDI controller alive. With that fix, five strict
-correct-password repetitions at edge 260, delay 0 ns, and width 8 ns all
-returned `ACCESS_JUN_SET`. A strict wrong-password shot returned
-`LOCKED_OR_UNRESPONSIVE`, followed by successful correct-password recovery with
-live registers and three stable `LCSTAT=0xe0000002` reads. The existing evidence
-therefore says that this 8 ns point does not block the correct password.
-
-## Stage 2: attack the wrong-password path
-
-After Stage 1 establishes a repeatable physical effect near the comparison,
-fault the one-bit-wrong password using the same calibrated edge:
+Only after locating a repeatable correct-password boundary should the script
+submit the one-bit-wrong password in the same timing region:
 
 ```bash
 .venv/bin/python projects/spc584b/spc584b_password_glitch.py \
   --mode attack \
-  --rpico /dev/cu.usbmodemXXXX \
-  --password-file /secure/path/jtag-password.bin \
-  --edge-count MEASURED_EDGE \
+  --rpico /dev/cu.usbmodem1301 \
+  --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
+  --edge-count 260 \
   --delay MIN_DELAY_NS MAX_DELAY_NS \
   --length MIN_LENGTH_NS MAX_LENGTH_NS \
   --strict-oracle
 ```
 
-Attack mode defaults to at most 100,000 shuffled attempts and 100 repetitions
-per grid point. Override those with `--attempts` and `--repeats`. OpenOCD stays
-alive across attempts; the script restarts it and reruns both controls only if
-the Tcl session becomes unusable.
+An `ACCESS_CANDIDATE` requires three stable direct reads with LCSTAT.JUN set.
+The script stops without applying another reset so the authorization state can
+be checked independently. Exit codes are 0 for no candidate, 10 for an access
+candidate, 2 for an experimental error, and 130 for interruption.
 
-An `ACCESS_CANDIDATE` requires a successful halt and verified register reads.
-Three LCSTAT reads distinguish a stable `JUN` result from an unstable or
-invalid status read; every real-access classification stops immediately and
-leaves the target halted without an additional reset. Exit codes are 0 for no
-candidate, 10 for a fault/access candidate, 2 for an experimental error, and
-130 for interruption.
+## Edge mapping with a scope
 
-The timing lattice defaults to 4 ns steps, delays from 0 through 1,000 ns, and
-pulse widths from 8 through 28 ns at 1 MHz JTAG. Use `--high-power` only after
-validating the electrical effect and safe pulse width on an oscilloscope.
+With the glitch output physically disconnected from the target rail:
+
+```bash
+.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
+  --mode edge-map \
+  --rpico /dev/cu.usbmodem1301 \
+  --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
+  --edge-range 252 264 \
+  --confirm-glitch-disconnected
+```
+
+Use TCK and the marker output to identify the final password-scan clocks. The
+Pico PIO counts the externally generated TCK waveform in hardware.
