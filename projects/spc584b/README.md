@@ -4,8 +4,9 @@ This experiment sends one uninterrupted 256-bit JTAG password transaction.
 The Pico PIO counts FTDI-generated TCK rising edges and emits the crowbar pulse
 at one scope-calibrated edge. One external FTDI and OpenOCD session remains
 alive for the campaign. Each shot applies the SPC584B destructive reset, proves
-the exact TAP IDCODE, arms the Pico, sends one uninterrupted password scan, and
-then verifies halt, live registers, and three stable LCSTAT reads.
+the exact TAP IDCODE, reinitializes the FTDI reset lines and scan chain, arms the
+Pico, sends one uninterrupted password scan, and then verifies halt, live
+registers, and three stable LCSTAT reads.
 
 The code never writes flash, UTEST, DCF, lifecycle, or OTP. Every result is
 printed to stdout.
@@ -27,20 +28,23 @@ campaign until the scope shows a repeatable disturbance at the MCU-side
 measurement point.
 
 The FTDI probe and Pico must remain powered independently of the target. The
-SPC584B DCI destructive reset has the same password-security effect as a full
-board power cycle, while allowing the external FTDI/OpenOCD process to remain
-alive. Before every password submission, the script requires IDCODE
-`0x20144041`; it retries the reset three times and aborts instead of firing if
-the TAP does not recover.
+SPC584B DCI destructive reset re-arms password security while allowing the
+external FTDI/OpenOCD process to remain alive. The script then asks OpenOCD to
+cycle its FTDI-controlled TRST/SRST lines and reinitialize the scan chain. This
+second step is required after a locked-core halt attempt: raw IDCODE can remain
+valid while OpenOCD can no longer recover correct-password core access. Before
+every password submission, the script requires IDCODE `0x20144041`; it retries
+the reset three times and aborts instead of firing if the TAP does not recover.
 
 The per-shot order mirrors the proven MPC574X flow:
 
 1. keep the external FTDI/OpenOCD controller alive;
 2. destructively reset the target to re-arm the password check;
-3. verify the target IDCODE, retrying reset on failure;
-4. configure and arm the Pico edge trigger;
-5. send one uninterrupted 256-bit wrong-password transaction;
-6. require a real halt and register reads, then sample LCSTAT three times.
+3. cycle the external FTDI reset lines and reinitialize the scan chain;
+4. verify the target IDCODE, retrying reset on failure;
+5. configure and arm the Pico edge trigger;
+6. send one uninterrupted 256-bit wrong-password transaction;
+7. require a real halt and register reads, then sample LCSTAT three times.
 
 ## Install
 
@@ -90,7 +94,8 @@ not. It then faults the correct password and stops at the first changed result.
   --password-file /secure/path/jtag-password.bin \
   --edge-count MEASURED_EDGE \
   --delay 0 1000 \
-  --length 8 28
+  --length 8 28 \
+  --strict-oracle
 ```
 
 `FAULT_OBSERVED` proves only that the pulse changed target behavior. A reset,
@@ -118,6 +123,7 @@ At 1 MHz JTAG, edge 260 is the computed `Update-DR` point for this uninterrupted
   --delay 0 1000 \
   --length 8 28 \
   --repeats 1 \
+  --strict-oracle \
   --output projects/spc584b/run-artifacts/edge260-sensitivity.csv
 ```
 
@@ -126,7 +132,36 @@ to stable accepted cells. Repeat a narrower region around those cells before
 using the same region in `attack` mode. The output path must not already exist;
 the script refuses to overwrite an earlier run.
 
-### Observed direct characterization, 2026-09-12
+`wait_halt` failure alone cannot distinguish a locked core from a core that was
+reset, crashed, or otherwise became unresponsive. Use `--strict-oracle` when
+mapping a point without a scope. Before every shot, strict mode applies the DCI
+destructive reset, verifies the exact IDCODE, proves that debug access is denied
+without a password, then applies a second destructive reset before the password
+scan. After every no-access result it resets again and requires the correct
+password to produce live registers and three stable `LCSTAT` reads with `JUN=1`.
+The run aborts instead of counting the shot if that recovery check fails.
+
+```bash
+.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
+  --mode sensitivity-map \
+  --rpico /dev/cu.usbmodem1301 \
+  --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
+  --edge-count 260 \
+  --delay 0 0 \
+  --length 8 8 \
+  --repeats 100 \
+  --halt-timeout-ms 2000 \
+  --strict-oracle \
+  --output projects/spc584b/run-artifacts/edge260-d0-l8-strict-repeat100.csv
+```
+
+A destructive reset is required between independent attempts because a
+successful password scan sets temporary debug authorization. Reusing that state
+would allow one accepted password to contaminate later results. The normal mode
+already resets and verifies IDCODE before every shot; strict mode adds the paired
+denial and recovery checks around it.
+
+### Invalidated direct characterization, 2026-09-12
 
 The SPC584B-DIS was tested with its onboard PLS FTDI at 1 MHz, PicoGlitcher and
 findus 1.14.1 in low-power mode, TCK edge 260, delay 0 ns, and width 8 ns. Scope
@@ -143,11 +178,21 @@ calibration was intentionally skipped. This command was run twice:
   --attempts 1
 ```
 
-Both runs passed the controls (`ACCESS_JUN_SET` for the correct password and
-`LOCKED_OR_UNRESPONSIVE` for the one-bit-wrong password). In both glitched
-correct-password shots, the result changed to `LOCKED_OR_UNRESPONSIVE`. This is
-a reproducible authentication-path disturbance, not evidence of wrong-password
-acceptance, and without a scope it does not establish the VDD_LV waveform.
+Both runs appeared to pass the controls, and a subsequent fixed-point run
+returned `LOCKED_OR_UNRESPONSIVE` for all 100 correct-password shots. Those
+results are invalid as evidence of an authentication disturbance. A strict
+recovery test showed that, after the first failed halt, DCI reset plus an IDCODE
+check did not restore correct-password access in the same OpenOCD state. A fresh
+OpenOCD process restored it immediately. IDCODE had therefore been proving only
+that the TAP remained alive while the core-debug path stayed stale.
+
+The harness now runs `jtag arp_init-reset` after DCI reset while keeping the
+OpenOCD process and FTDI controller alive. With that fix, five strict
+correct-password repetitions at edge 260, delay 0 ns, and width 8 ns all
+returned `ACCESS_JUN_SET`. A strict wrong-password shot returned
+`LOCKED_OR_UNRESPONSIVE`, followed by successful correct-password recovery with
+live registers and three stable `LCSTAT=0xe0000002` reads. The existing evidence
+therefore says that this 8 ns point does not block the correct password.
 
 ## Stage 2: attack the wrong-password path
 
@@ -161,7 +206,8 @@ fault the one-bit-wrong password using the same calibrated edge:
   --password-file /secure/path/jtag-password.bin \
   --edge-count MEASURED_EDGE \
   --delay MIN_DELAY_NS MAX_DELAY_NS \
-  --length MIN_LENGTH_NS MAX_LENGTH_NS
+  --length MIN_LENGTH_NS MAX_LENGTH_NS \
+  --strict-oracle
 ```
 
 Attack mode defaults to at most 100,000 shuffled attempts and 100 repetitions
