@@ -69,18 +69,23 @@ This does not initialize or fire the Pico. It must show all of the following:
 RAW_IDCODE=0x20144041
 CONTROL password=correct result=ACCESS_JUN_SET
 CONTROL password=wrong result=<anything other than ACCESS_JUN_SET>
+CONTROL password=correct_recovery result=ACCESS_JUN_SET
 EXPERIMENT_RESULT=CONTROLS_PASS
 ```
 
 The correct control proves the password word order, OnCE route, Nexus
 transactions, target byte order, LCSTAT address, and JUN mask through the raw
 Python implementation. The wrong control proves that a destructive reset
-re-arms security and that one changed password bit does not set JUN. A campaign
-must not run if either control fails.
+re-arms security and that one changed password bit does not set JUN. The final
+correct-password control proves recovery from that denied state in the same
+persistent PyFtdi session. A campaign must not run if any control fails.
 
-The raw FTDI path has independently read the exact IDCODE on this board. Direct
-LCSTAT control validation is the remaining hardware acceptance test after the
-daemon removal.
+The initial hardware acceptance run on 2026-09-12 returned raw IDCODE
+`0x20144041`; three correct-password reads of `LCSTAT=0xe0000002` with
+`RWCS=0x10c00005`, stable data, `JUN=1`, and no transport error; and three
+wrong-password reads of zero with `JUN=0` and no transport error. This validates
+the direct positive and negative oracle. The added final recovery control still
+needs one on-board run.
 
 ## Characterize the connected crowbar
 

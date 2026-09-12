@@ -165,6 +165,17 @@ def run_controls(
             f"{wrong.state}"
         )
 
+    recovery = submit_without_glitch(session, correct_words, args)
+    print(
+        f"CONTROL password=correct_recovery result={recovery.state} "
+        f"detail={recovery.detail}"
+    )
+    if recovery.state != "ACCESS_JUN_SET":
+        raise ExperimentError(
+            "correct-password control did not recover after the wrong-password "
+            f"denial: {recovery.state}"
+        )
+
 
 def prepare_glitched_submission(
     session: SPC584BJtag, args: argparse.Namespace
