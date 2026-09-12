@@ -661,6 +661,12 @@ def main() -> int:
             print("MODE=controls", flush=True)
             print("PASSWORD_SCAN=UNINTERRUPTED_256_BIT_DRSCAN", flush=True)
             print("JTAG_CONTROLLER=EXTERNAL_FTDI_PERSISTENT_PYFTDI_RAW", flush=True)
+            print("TARGET_REARM=FTDI_EXTERNAL_PORST_PLUS_RAW_TAP_RESET", flush=True)
+            print(
+                "PORST_CONTROL=FTDI_ACBUS1_SRST_OUT_ACBUS5_DIRECTION",
+                flush=True,
+            )
+            print(f"PORST_HOLD_MS={args.reset_hold_ms}", flush=True)
             print("POST_PASSWORD_ORACLE=DIRECT_NEXUS_LCSTAT_X3", flush=True)
             session = SPC584BJtag(
                 frequency_hz=args.adapter_speed_khz * 1000,
