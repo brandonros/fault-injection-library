@@ -99,6 +99,11 @@ affects the target/JTAG path and the effect is recoverable. It does not identify
 the mechanism; at this width a broad brownout or reset remains the likely
 explanation.
 
+At the other endpoint, five raw shots at edge 260, delay 0 ns, and width 8 ns
+all returned three stable `LCSTAT=0xe0000002` reads with `JUN=1`. The 8 ns pulse
+therefore had no detectable effect. The measured transition lies somewhere
+between 8 ns and 20 us at this edge and delay.
+
 The recorded command was:
 
 ```bash
