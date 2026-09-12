@@ -490,7 +490,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--power-relay-port",
-        help="serial port for the AT+CH1 relay switching the board's 12 V DC feed",
+        help="serial port for the relay switching the board's 12 V DC feed",
     )
     parser.add_argument(
         "--manual-power-cycle",
@@ -506,8 +506,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--relay-baud", type=int, default=9600)
-    parser.add_argument("--relay-on-state", type=int, choices=(0, 1), default=0)
-    parser.add_argument("--relay-off-state", type=int, choices=(0, 1), default=1)
+    parser.add_argument(
+        "--relay-protocol",
+        choices=("at", "lcus"),
+        default="at",
+        help="serial relay protocol (default: at)",
+    )
+    parser.add_argument("--relay-on-state", type=int, choices=(0, 1))
+    parser.add_argument("--relay-off-state", type=int, choices=(0, 1))
     parser.add_argument("--power-off-seconds", type=float, default=1.5)
     parser.add_argument("--power-settle-seconds", type=float, default=4.0)
     parser.add_argument("--adapter-speed-khz", type=int, default=1000)
@@ -536,6 +542,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if args.relay_on_state is None:
+        args.relay_on_state = 1 if args.relay_protocol == "lcus" else 0
+    if args.relay_off_state is None:
+        args.relay_off_state = 0 if args.relay_protocol == "lcus" else 1
     for name in ("delay", "length"):
         low, high = getattr(args, name)
         if low < 0 or high < low:
@@ -626,6 +636,7 @@ def main() -> int:
         if args.power_relay_port:
             power_controller = SerialPowerRelay(
                 args.power_relay_port,
+                protocol=args.relay_protocol,
                 baudrate=args.relay_baud,
                 on_state=args.relay_on_state,
                 off_state=args.relay_off_state,

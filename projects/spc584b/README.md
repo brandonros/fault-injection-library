@@ -92,8 +92,36 @@ Enter. The script waits 1.5 seconds while off and 4 seconds after power-on.
 The test must show the
 expected IDCODE while on, a different or unreadable IDCODE while off, the
 expected IDCODE after restoration, and `POWER_CYCLE_TEST_PASS`. Campaign modes
-also repeat this physical proof at startup. An `AT+CH1` USB relay remains an
-optional automation path through `--power-relay-port`.
+also repeat this physical proof at startup. AT-command and LCUS-1 USB relays
+can automate it through `--power-relay-port`.
+
+The detected SMAKN LCUS-1 appears on this Mac as `/dev/cu.usbserial-110`. Its
+normally-open dry contacts switch the 12 V feed; the relay's USB connection
+only powers and controls the relay. With the bench supply output off, wire:
+
+- bench-supply positive to relay `COM`;
+- relay `NO` to the positive terminal of a 5.5 x 2.1 mm male barrel-plug adapter;
+- bench-supply negative directly to the adapter's negative terminal;
+- the barrel plug to board connector X5, with board switch S1 left on.
+
+Use the markings on the relay PCB to identify `COM` and `NO`; do not infer the
+terminal order from the product photograph. Set the bench supply to 12.0 V
+with an initial 0.5 A current limit and verify the barrel polarity matches the
+original adapter before enabling its output. Then validate automated cold
+cycling:
+
+```bash
+.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
+  --mode power-cycle-test \
+  --power-relay-port /dev/cu.usbserial-110 \
+  --relay-protocol lcus \
+  --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin
+```
+
+For LCUS-1, the script defaults to binary state 1 for on and state 0 for off.
+The run must show IDCODE `0x20144041` with power on, an unreadable IDCODE with
+power off, restoration of `0x20144041`, and `POWER_CYCLE_TEST_PASS` before the
+relay is used in a campaign.
 
 The bench acceptance run on 2026-09-12 passed. With S1 on, raw IDCODE was
 `0x20144041`; with S1 off, it became `0xffffffff`; and after S1 was restored it

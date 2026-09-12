@@ -42,24 +42,33 @@ class ManualPowerCycle:
 
 
 class SerialPowerRelay:
-    """Control the AT+CH1 relay already used by the MPC574X rig."""
-
-    name = "SERIAL_AT_CH1_RELAY"
+    """Control an AT+CH1 or LCUS-1 serial relay."""
 
     def __init__(
         self,
         port: str,
         *,
+        protocol: str = "at",
         baudrate: int = 9600,
-        on_state: int = 0,
-        off_state: int = 1,
+        on_state: int | None = None,
+        off_state: int | None = None,
         off_seconds: float = 1.5,
         settle_seconds: float = 4.0,
         serial_factory=serial.Serial,
     ):
+        if protocol not in {"at", "lcus"}:
+            raise ValueError("relay protocol must be 'at' or 'lcus'")
+        if on_state is None:
+            on_state = 1 if protocol == "lcus" else 0
+        if off_state is None:
+            off_state = 0 if protocol == "lcus" else 1
         if on_state == off_state or {on_state, off_state} != {0, 1}:
             raise ValueError("relay on/off states must be different values from {0, 1}")
         self.port = port
+        self.protocol = protocol
+        self.name = (
+            "SERIAL_LCUS1_RELAY" if protocol == "lcus" else "SERIAL_AT_CH1_RELAY"
+        )
         self.baudrate = baudrate
         self.on_state = on_state
         self.off_state = off_state
@@ -93,9 +102,15 @@ class SerialPowerRelay:
         if self.serial is None:
             raise RelayError("power relay is not open")
         self.serial.reset_input_buffer()
-        self.serial.write(f"AT+CH1={state}\r\n".encode())
+        if self.protocol == "lcus":
+            command = bytes((0xA0, 0x01, state, 0xA1 + state))
+        else:
+            command = f"AT+CH1={state}\r\n".encode()
+        self.serial.write(command)
         self.serial.flush()
         time.sleep(0.12)
+        if self.protocol == "lcus":
+            return f"LCUS state={state}"
         response = self.serial.read(64).decode(errors="replace").strip()
         return response
 
