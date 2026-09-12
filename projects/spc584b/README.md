@@ -104,6 +104,12 @@ all returned three stable `LCSTAT=0xe0000002` reads with `JUN=1`. The 8 ns pulse
 therefore had no detectable effect. The measured transition lies somewhere
 between 8 ns and 20 us at this edge and delay.
 
+A subsequent coarse sweep tested widths from 1 us through 20 us in 1 us steps
+with three repetitions per cell. The 1 us cell passed 3/3. Every cell from
+2 us through 20 us produced stable all-ones LCSTAT/RWCS data 3/3 and recovered
+with the correct password. The coarse transition is therefore between 1 us and
+2 us; the uniform behavior above 2 us continues to look like rail collapse.
+
 The recorded command was:
 
 ```bash
