@@ -497,6 +497,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="pause for manual use of the board's S1 ON/OFF switch each cycle",
     )
+    parser.add_argument(
+        "--reset-only-attack",
+        action="store_true",
+        help=(
+            "exploratory attack mode: use guarded DCI/nTRST/nSRST resets between "
+            "shots and abort if correct-password recovery fails"
+        ),
+    )
     parser.add_argument("--relay-baud", type=int, default=9600)
     parser.add_argument("--relay-on-state", type=int, choices=(0, 1), default=0)
     parser.add_argument("--relay-off-state", type=int, choices=(0, 1), default=1)
@@ -515,7 +523,7 @@ def parse_args() -> argparse.Namespace:
         "--strict-oracle",
         action="store_true",
         help=(
-            "before every shot require a fresh cold-cycle/IDCODE gate, then "
+            "before every shot require the configured reset/IDCODE gate, then "
             "require correct-password recovery after every no-access result"
         ),
     )
@@ -542,6 +550,14 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ExperimentError(
             "choose only one of --power-relay-port and --manual-power-cycle"
         )
+    if args.reset_only_attack and args.mode != "attack":
+        raise ExperimentError("--reset-only-attack is supported only in attack mode")
+    if args.reset_only_attack and (args.power_relay_port or args.manual_power_cycle):
+        raise ExperimentError(
+            "--reset-only-attack cannot be combined with a power-cycle option"
+        )
+    if args.reset_only_attack and not args.strict_oracle:
+        raise ExperimentError("--reset-only-attack requires --strict-oracle")
     has_cold_cycle = bool(args.power_relay_port or args.manual_power_cycle)
     if args.mode == "power-cycle-test" and not has_cold_cycle:
         raise ExperimentError(
@@ -549,11 +565,12 @@ def validate_args(args: argparse.Namespace) -> None:
         )
     if args.mode in ("characterize", "sensitivity-map", "attack"):
         if not has_cold_cycle:
-            raise ExperimentError(
-                f"{args.mode} requires a real target power cycle via "
-                "--manual-power-cycle or --power-relay-port; "
-                "DCI/nTRST/nSRST proved insufficient"
-            )
+            if not (args.mode == "attack" and args.reset_only_attack):
+                raise ExperimentError(
+                    f"{args.mode} requires a real target power cycle via "
+                    "--manual-power-cycle or --power-relay-port; "
+                    "DCI/nTRST/nSRST proved insufficient"
+                )
     if args.mode == "edge-map":
         if not args.confirm_glitch_disconnected:
             raise ExperimentError(
@@ -688,12 +705,23 @@ def main() -> int:
         print("PASSWORD_SCAN=UNINTERRUPTED_256_BIT_DRSCAN", flush=True)
         print("TRIGGER_REFERENCE=TCK_EDGES_AFTER_PASSWORD_IR_SELECTION", flush=True)
         print("JTAG_CONTROLLER=EXTERNAL_FTDI_PERSISTENT_PYFTDI_RAW", flush=True)
-        target_rearm = (
-            f"FULL_BOARD_POWER_CYCLE_{power_controller.name}_PLUS_RAW_TAP_RESET"
-            if power_controller is not None
-            else "DCI_DESTRUCTIVE_RESET_PLUS_RAW_TAP_RESET"
-        )
+        if args.reset_only_attack:
+            target_rearm = (
+                "GUARDED_DCI_DESTRUCTIVE_RESET_PLUS_RAW_TAP_RESET_"
+                "ABORT_ON_RECOVERY_FAILURE"
+            )
+        elif power_controller is not None:
+            target_rearm = (
+                f"FULL_BOARD_POWER_CYCLE_{power_controller.name}_PLUS_RAW_TAP_RESET"
+            )
+        else:
+            target_rearm = "DCI_DESTRUCTIVE_RESET_PLUS_RAW_TAP_RESET"
         print(f"TARGET_REARM={target_rearm}", flush=True)
+        if args.reset_only_attack:
+            print(
+                "RESET_ASSURANCE=EXPLORATORY_ABORT_IF_STRICT_RECOVERY_FAILS",
+                flush=True,
+            )
         if args.strict_oracle:
             pre_shot_gate = (
                 "EXPECTED_IDCODE_AFTER_FULL_POWER_CYCLE"
@@ -716,8 +744,9 @@ def main() -> int:
             power_cycle=power_cycle,
         ).__enter__()
         if args.mode in ("characterize", "sensitivity-map", "attack"):
-            assert power_controller is not None
-            verify_power_cycle(session, power_controller, args)
+            if not args.reset_only_attack:
+                assert power_controller is not None
+                verify_power_cycle(session, power_controller, args)
         run_controls(session, correct_words, wrong_words, args)
 
         if args.mode == "edge-map":

@@ -272,6 +272,29 @@ submit the one-bit-wrong password in the same timing region:
   --strict-oracle
 ```
 
+For exploratory batches without repeated manual S1 prompts, attack mode can
+use guarded DCI/nTRST/nSRST resets. Strict mode proves a locked state before
+each shot and correct-password recovery after every denial. The run aborts
+instead of continuing if either gate fails:
+
+```bash
+.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
+  --mode attack \
+  --reset-only-attack \
+  --rpico /dev/cu.usbmodem1301 \
+  --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
+  --edge-count 260 \
+  --delay 0 0 \
+  --length 1908 1908 \
+  --repeats 10 \
+  --attempts 10 \
+  --strict-oracle
+```
+
+This batch mode avoids routine power-switch operation. A recovery failure
+still requires one full power cycle before another run, and any access
+candidate must be reproduced with the full cold-cycle method.
+
 An `ACCESS_CANDIDATE` requires three stable direct reads with LCSTAT.JUN set.
 The script stops without applying another reset so the authorization state can
 be checked independently. Exit codes are 0 for no candidate, 10 for an access
