@@ -2,8 +2,10 @@
 
 This experiment sends one uninterrupted 256-bit JTAG password transaction.
 The Pico PIO counts FTDI-generated TCK rising edges and emits the crowbar pulse
-at one scope-calibrated edge. It does not pause in `DRPAUSE`, create a database,
-or start a new OpenOCD process for every attempt.
+at one scope-calibrated edge. One external FTDI and OpenOCD session remains
+alive for the campaign. Each shot applies the SPC584B destructive reset, proves
+the exact TAP IDCODE, arms the Pico, sends one uninterrupted password scan, and
+then verifies halt, live registers, and three stable LCSTAT reads.
 
 The code never writes flash, UTEST, DCF, lifecycle, or OTP. Every result is
 printed to stdout.
@@ -14,12 +16,28 @@ printed to stdout.
 - Pico trigger input to JTAG `TCK`
 - Pico `GLITCH` to the rail-side pad of the VDD_LV injection point
 - Pico `RESET` and `VTARGET` disconnected
-- Board independently powered; FTDI JTAG connected
+- Board independently powered; external FTDI JTAG connected
 - Oscilloscope probes on TCK, Pico `GLITCH`, and an MCU-side VDD_LV point
 
 On the stock discovery board, C43 is on VDD_LV but is not isolated from Q1 or
 the remaining rail capacitance. Do not interpret a campaign until the scope
 shows a repeatable disturbance at the MCU-side measurement point.
+
+The FTDI probe and Pico must remain powered independently of the target. The
+SPC584B DCI destructive reset has the same password-security effect as a full
+board power cycle, while allowing the external FTDI/OpenOCD process to remain
+alive. Before every password submission, the script requires IDCODE
+`0x20144041`; it retries the reset three times and aborts instead of firing if
+the TAP does not recover.
+
+The per-shot order mirrors the proven MPC574X flow:
+
+1. keep the external FTDI/OpenOCD controller alive;
+2. destructively reset the target to re-arm the password check;
+3. verify the target IDCODE, retrying reset on failure;
+4. configure and arm the Pico edge trigger;
+5. send one uninterrupted 256-bit wrong-password transaction;
+6. require a real halt and register reads, then sample LCSTAT three times.
 
 ## Install
 
@@ -97,10 +115,12 @@ per grid point. Override those with `--attempts` and `--repeats`. OpenOCD stays
 alive across attempts; the script restarts it and reruns both controls only if
 the Tcl session becomes unusable.
 
-An `ACCESS_CANDIDATE` requires a successful halt plus verified register and
-LCSTAT reads. It stops immediately and leaves the target halted without an
-additional reset. Exit codes are 0 for no candidate, 10 for a fault/access
-candidate, 2 for an experimental error, and 130 for interruption.
+An `ACCESS_CANDIDATE` requires a successful halt and verified register reads.
+Three LCSTAT reads distinguish a stable `JUN` result from an unstable or
+invalid status read; every real-access classification stops immediately and
+leaves the target halted without an additional reset. Exit codes are 0 for no
+candidate, 10 for a fault/access candidate, 2 for an experimental error, and
+130 for interruption.
 
 The timing lattice defaults to 4 ns steps, delays from 0 through 1,000 ns, and
 pulse widths from 8 through 28 ns at 1 MHz JTAG. Use `--high-power` only after

