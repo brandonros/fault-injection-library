@@ -356,6 +356,15 @@ FTDI signal reaches the board RESET/PORST net and that PORST handles ordinary
 password-state rearming, while the observed faulted state still required a
 full power cycle.
 
+A fresh reset-only attack then used 1000 ms PORST holds and randomized widths
+from 1.876 through 1.904 us. Widths 1.904 and 1.880 us produced ordinary
+zero-valued denial and passed correct-password recovery. The next shot at
+1.900 us also produced ordinary denial, but the following correct-password
+submission remained at zero after PORST, so the strict guard stopped after
+three attempts. No access was observed. Post-fault PORST recovery is therefore
+not deterministic near this timing region, even when the immediate oracle is
+the ordinary zero-valued denial rather than invalid all-ones data.
+
 An `ACCESS_CANDIDATE` requires three stable direct reads with LCSTAT.JUN set.
 The script stops without applying another reset so the authorization state can
 be checked independently. Exit codes are 0 for no candidate, 10 for an access
