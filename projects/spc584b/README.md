@@ -188,7 +188,8 @@ and a third test at 1.876 us passed 3/3 identically. The validated bracket is
 therefore narrowed to 1.876-2.000 us. At 1.940 us, all three shots instead
 returned invalid all-ones LCSTAT/RWCS samples, and all three restored correct
 password access after another cold cycle. A 1.908 us test passed 3/3 with
-stable, valid access. The validated bracket is therefore 1.908-1.940 us. This
+stable, valid access. A 1.924 us test returned the same recoverable invalid
+all-ones samples 3/3. The validated bracket is therefore 1.908-1.924 us. This
 remains an electrical-effect boundary; it is not evidence that an incorrect
 password can set JUN.
 
