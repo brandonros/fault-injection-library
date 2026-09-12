@@ -30,12 +30,12 @@ resets the TAP. Earlier revisions incorrectly treated ACBUS5 as the reset
 output, so they did not assert PORST. Full cold cycles remain the authoritative
 method for reproducing any access candidate.
 
-That recovery test then passed on the exact target state left behind by a
-failed pre-fix DCI recovery. Without pressing SW1 or cycling board power, the
-corrected 250 ms FTDI PORST implementation restored IDCODE `0x20144041`,
-correct-password `ACCESS_JUN_SET`, the expected wrong-password zero response,
-and correct-password recovery `ACCESS_JUN_SET`. Programmatic PORST therefore
-replaces manual RESET-button operation for guarded exploratory attack batches.
+A control run after the mapping correction passed without pressing SW1 or
+cycling board power: IDCODE was `0x20144041`, the correct password set JUN, the
+wrong password returned zero, and correct-password recovery set JUN again.
+That result showed that ordinary transactions work with FTDI PORST, but a
+subsequent immediate post-fault test showed that it is not sufficient evidence
+of authoritative fault recovery.
 
 The code never writes flash, UTEST, DCF, lifecycle, or OTP.
 
@@ -336,6 +336,15 @@ none set JUN. The first nine recoveries passed, while the tenth remained at
 zero after the pre-fix DCI/TAP reset. This proves the abort guard and the
 former reset path's limitation; it does not characterize the corrected PORST
 implementation.
+
+The first attack using corrected 250 ms FTDI PORST stopped after one 1.908 us
+shot. Its pre-shot locked gate passed and the shot returned the ordinary
+zero-valued denial, but the following PORST, IDCODE gate, and correct-password
+submission still returned zero. Thus PORST restored a readable main TAP but
+did not restore authorization behavior after this fault. No access was
+observed. Longer PORST assertion and physical LD4 reset indication must be
+checked before relying on this path; otherwise a full power cycle remains
+necessary.
 
 An `ACCESS_CANDIDATE` requires three stable direct reads with LCSTAT.JUN set.
 The script stops without applying another reset so the authorization state can
