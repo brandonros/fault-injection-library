@@ -313,6 +313,14 @@ one returned the ordinary locked zero response. Every recovery passed and no
 shot set JUN. This is a mixed disruption boundary, so repeated sampling at the
 same point is required before refining nearby timings.
 
+A planned 20-shot repeat at 1.892 us then stopped after attempt 9 when strict
+correct-password recovery failed. Of the ten completed shots, seven returned
+invalid all-ones data and three returned the ordinary locked zero response;
+none set JUN. The first nine recoveries passed, while the tenth remained at
+zero after DCI/nTRST/nSRST. This is direct evidence that reset-only batching
+cannot run indefinitely at the mixed boundary. The guard prevented further
+shots, and a full target power cycle is required before continuing.
+
 An `ACCESS_CANDIDATE` requires three stable direct reads with LCSTAT.JUN set.
 The script stops without applying another reset so the authorization state can
 be checked independently. Exit codes are 0 for no candidate, 10 for an access
