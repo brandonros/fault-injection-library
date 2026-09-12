@@ -50,6 +50,29 @@ class RawJtagTests(unittest.TestCase):
         self.assertEqual(probe.state, "ORACLE_ERROR")
         self.assertIn("USB read failed", probe.detail)
 
+    def test_close_releases_auxiliary_tap_before_ftdi(self):
+        events = []
+
+        class FakeEngine:
+            def sync(self):
+                events.append("sync")
+
+            def close(self):
+                events.append("close")
+
+        jtag = SPC584BJtag()
+        jtag.engine = FakeEngine()
+        jtag._in_once = True
+        jtag.release_once = lambda: events.append("release_once")
+        jtag._set_reset_lines = lambda **_kwargs: events.append("deassert_reset")
+        jtag.close()
+
+        self.assertEqual(
+            events,
+            ["release_once", "deassert_reset", "sync", "close"],
+        )
+        self.assertIsNone(jtag.engine)
+
 
 if __name__ == "__main__":
     unittest.main()

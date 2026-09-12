@@ -141,13 +141,16 @@ class SPC584BJtag:
             )
             controller._ftdi.set_latency_timer(1)
             self.engine = engine
-            self._set_reset_lines(trst_asserted=False, srst_asserted=False)
-            self.tap_reset()
+            # A previous process may have closed while an auxiliary OnCE TAP
+            # owned the chain. Hardware reset both target-facing reset lines so
+            # a new process always starts from the main JTAGC TAP.
+            self.reset_lines_and_tap(hold_ms=100)
             return self
         except Exception:
             try:
                 engine.close()
             finally:
+                self.engine = None
                 if self.device is not None:
                     usb.util.dispose_resources(self.device)
                 self.device = None
@@ -156,6 +159,17 @@ class SPC584BJtag:
     def close(self) -> None:
         if self.engine is not None:
             try:
+                try:
+                    self.release_once()
+                    self._set_reset_lines(
+                        trst_asserted=False,
+                        srst_asserted=False,
+                    )
+                    self.engine.sync()
+                except Exception:
+                    # Startup asserts both reset lines, so cleanup failure
+                    # cannot contaminate the next process.
+                    pass
                 self.engine.close()
             finally:
                 self.engine = None

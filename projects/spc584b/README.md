@@ -20,6 +20,12 @@ No CPU halt request, process-state cache, socket, or timeout is used as an
 authorization result. The raw implementation is in `jtag_pyftdi.py`. The
 campaign is in `spc584b_password_glitch.py`.
 
+Each process now asserts the board FTDI's nTRST/nSRST signals before its first
+transaction and releases OnCE ownership before closing. This prevents an
+auxiliary TAP selected by the preceding run from contaminating the next run.
+This startup cleanup was added after an unglitched correct-password control
+caught that condition and safely aborted before arming the Pico.
+
 The code never writes flash, UTEST, DCF, lifecycle, or OTP.
 
 ## Wiring
