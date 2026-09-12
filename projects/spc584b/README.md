@@ -84,8 +84,10 @@ The initial hardware acceptance run on 2026-09-12 returned raw IDCODE
 `0x20144041`; three correct-password reads of `LCSTAT=0xe0000002` with
 `RWCS=0x10c00005`, stable data, `JUN=1`, and no transport error; and three
 wrong-password reads of zero with `JUN=0` and no transport error. This validates
-the direct positive and negative oracle. The added final recovery control still
-needs one on-board run.
+the direct positive and negative oracle. The following correct-password
+recovery in the same persistent session again returned three stable
+`LCSTAT=0xe0000002` reads with `RWCS=0x10c00005`, `JUN=1`, and no transport
+error. The complete raw harness acceptance sequence therefore passes.
 
 ## Characterize the connected crowbar
 
