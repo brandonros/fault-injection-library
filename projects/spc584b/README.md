@@ -21,11 +21,14 @@ printed to stdout.
 - Board independently powered; external FTDI JTAG connected
 - Oscilloscope probes on TCK, Pico `GLITCH`, and an MCU-side VDD_LV point
 
-On the stock discovery board, C43 is a non-polarized capacitor between VDD_LV
-and GND; verify its pads by continuity to TP6 and GND with power removed. C43
-is not isolated from Q1 or the remaining rail capacitance. Do not interpret a
-campaign until the scope shows a repeatable disturbance at the MCU-side
-measurement point.
+On the stock discovery board, C43 is a 2.2 uF capacitor between VDD_LV and GND;
+verify its pads by continuity to TP8 and GND with power removed. C35 through C48
+place about 4.8 uF of listed capacitance on the same rail, and the Q1 pass
+transistor actively supplies it while the board is wall-powered. A Pico
+crowbar connected across C43 therefore fights both the full capacitor bank and
+the regulator. Wiring alone does not establish useful glitch authority. Do not
+interpret a nanosecond campaign until a scope shows a repeatable disturbance at
+the MCU-side measurement point or the no-scope authority gate below passes.
 
 The FTDI probe and Pico must remain powered independently of the target. The
 SPC584B DCI destructive reset re-arms password security while allowing the
@@ -110,6 +113,29 @@ pass/fail boundary before spending repetitions on the wrong-password path.
 This does not prove that VDD_LV moved, but it separates timing cells where the
 correct password remains accepted from cells where the pulse changes target
 behavior. Every completed attempt is flushed immediately to a CSV file.
+
+First prove that the connected low-power crowbar can affect this particular
+powered board. Use one deliberately long 20 us pulse with the correct password:
+
+```bash
+.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
+  --mode characterize \
+  --rpico /dev/cu.usbmodem1301 \
+  --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
+  --edge-count 260 \
+  --delay 0 0 \
+  --length 20000 20000 \
+  --attempts 1 \
+  --repeats 1 \
+  --halt-timeout-ms 2000 \
+  --strict-oracle
+```
+
+`ACCESS_JUN_SET` means the crowbar has not demonstrated authority even at this
+long width; stop rather than run the timing map. A changed result followed by
+`POST_SHOT_RECOVERY=PASS` establishes a detectable electrical effect, after
+which widths can be reduced to locate the pass/fail boundary. This digital gate
+still does not measure the shape or depth of a nanosecond VDD_LV pulse.
 
 At 1 MHz JTAG, edge 260 is the computed `Update-DR` point for this uninterrupted
 256-bit scan. Run its complete 4 ns timing lattice with:
