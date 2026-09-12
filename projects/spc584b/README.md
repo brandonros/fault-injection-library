@@ -295,6 +295,15 @@ This batch mode avoids routine power-switch operation. A recovery failure
 still requires one full power cycle before another run, and any access
 candidate must be reproduced with the full cold-cycle method.
 
+The first reset-only attack batch used the one-bit-wrong password at edge 260,
+delay 0, and width 1.908 us. All ten pre-shot gates showed the expected locked
+zero LCSTAT/RWCS data. All ten shots returned invalid all-ones data, and all
+ten DCI-reset correct-password recoveries restored stable `JUN=1`. The batch
+therefore found no access and demonstrated that 1.908 us is already disruptive
+under the reset-only attack conditions. Because both the password and reset
+regime differ from the cold-cycle correct-password map, this does not establish
+which difference moved the observed boundary.
+
 An `ACCESS_CANDIDATE` requires three stable direct reads with LCSTAT.JUN set.
 The script stops without applying another reset so the authorization state can
 be checked independently. Exit codes are 0 for no candidate, 10 for an access
