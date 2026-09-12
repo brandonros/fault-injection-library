@@ -185,8 +185,11 @@ on every shot. The validated disruption bracket at edge 260 and delay 0 is
 therefore narrowed to 1.5-2.0 us. A second midpoint test at 1.752 us also
 passed 3/3 across separate cold boots with the same stable, valid values,
 and a third test at 1.876 us passed 3/3 identically. The validated bracket is
-therefore narrowed to 1.876-2.000 us. This remains an electrical-effect
-boundary; it is not evidence that an incorrect password can set JUN.
+therefore narrowed to 1.876-2.000 us. At 1.940 us, all three shots instead
+returned invalid all-ones LCSTAT/RWCS samples, and all three restored correct
+password access after another cold cycle. The validated bracket is therefore
+1.876-1.940 us. This remains an electrical-effect boundary; it is not evidence
+that an incorrect password can set JUN.
 
 The recorded command was:
 
