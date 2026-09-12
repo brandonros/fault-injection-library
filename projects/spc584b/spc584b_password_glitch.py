@@ -5,9 +5,10 @@ The experiment sends one uninterrupted 256-bit password scan. The Pico
 Glitcher counts TCK edges from the start of that scan and fires early enough
 for a delayed pulse to land before, during, or after the final scan clocks.
 
-Five explicit modes are provided:
+Six explicit modes are provided:
 
 * controls: validate raw IDCODE and correct/wrong-password LCSTAT behavior;
+* power-cycle-test: prove the external relay removes and restores target power;
 * edge-map: emit scope markers with the glitch lead physically disconnected;
 * characterize: send the correct password and stop on the first changed result;
 * sensitivity-map: map correct-password pass/fail behavior across a full grid;
@@ -34,6 +35,7 @@ import time
 from findus import PicoGlitcher
 from findus.pyboard import PyboardError
 from jtag_pyftdi import AccessProbe, SPC584BJtag
+from power_relay import SerialPowerRelay
 
 
 EXPECTED_IDCODE = 0x20144041
@@ -113,6 +115,45 @@ def reset_and_verify_target(
     )
 
 
+def verify_power_relay(
+    session: SPC584BJtag,
+    relay: SerialPowerRelay,
+    args: argparse.Namespace,
+) -> None:
+    """Prove that the relay removes and restores the target's JTAG power."""
+    relay.turn_on()
+    time.sleep(args.power_settle_seconds)
+    session.reset_lines_and_tap(hold_ms=100)
+    before = session.require_idcode()
+    print(f"POWER_ON_IDCODE=0x{before:08x}", flush=True)
+
+    relay.turn_off()
+    off_idcode: int | None = None
+    off_error = ""
+    try:
+        time.sleep(args.power_off_seconds)
+        try:
+            off_idcode = session.read_idcode()
+        except Exception as error:
+            off_error = compact_error(error)
+    finally:
+        relay.turn_on()
+        time.sleep(args.power_settle_seconds)
+
+    if off_idcode is None:
+        print(f"POWER_OFF_IDCODE=UNREADABLE detail={off_error}", flush=True)
+    else:
+        print(f"POWER_OFF_IDCODE=0x{off_idcode:08x}", flush=True)
+
+    session.reset_lines_and_tap(hold_ms=100)
+    after = session.require_idcode()
+    print(f"POWER_RESTORED_IDCODE=0x{after:08x}", flush=True)
+    if off_idcode == EXPECTED_IDCODE:
+        raise ExperimentError(
+            "relay did not remove target power: IDCODE remained valid while off"
+        )
+
+
 def wait_for_trigger(glitcher: PicoGlitcher, timeout: float) -> bool:
     try:
         glitcher.block(timeout=timeout)
@@ -182,6 +223,17 @@ def prepare_glitched_submission(
 ) -> None:
     reset_and_verify_target(session, args.reset_hold_ms, args.health_retries)
     if not args.strict_oracle:
+        return
+
+    # The relay path just performed the authoritative target power cycle.
+    # Preserve the MPC574X ordering: cold cycle, IDCODE gate, arm, scan.
+    # A Nexus/JUN probe here would disturb that state and require a second
+    # cycle before the shot.
+    if session.power_cycle is not None:
+        print(
+            "PRE_SHOT_COLD_BOOT_GATE=PASS result=EXPECTED_IDCODE",
+            flush=True,
+        )
         return
 
     locked = probe_access(session)
@@ -354,9 +406,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         required=True,
-        choices=("controls", "edge-map", "characterize", "sensitivity-map", "attack"),
+        choices=(
+            "controls",
+            "power-cycle-test",
+            "edge-map",
+            "characterize",
+            "sensitivity-map",
+            "attack",
+        ),
         help=(
-            "controls validates raw JTAG without firing the Pico; edge-map emits "
+            "controls validates raw JTAG without firing the Pico; power-cycle-test "
+            "validates a 12 V relay; edge-map emits "
             "safe scope markers; characterize faults a correct "
             "password and stops on change; sensitivity-map records the full "
             "correct-password grid; attack faults a one-bit-wrong password"
@@ -428,6 +488,15 @@ def parse_args() -> argparse.Namespace:
         "--ftdi-serial",
         help="select one SPC584B-DISP FTDI by USB serial when several are attached",
     )
+    parser.add_argument(
+        "--power-relay-port",
+        help="serial port for the AT+CH1 relay switching the board's 12 V DC feed",
+    )
+    parser.add_argument("--relay-baud", type=int, default=9600)
+    parser.add_argument("--relay-on-state", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--relay-off-state", type=int, choices=(0, 1), default=1)
+    parser.add_argument("--power-off-seconds", type=float, default=1.5)
+    parser.add_argument("--power-settle-seconds", type=float, default=4.0)
     parser.add_argument("--adapter-speed-khz", type=int, default=1000)
     parser.add_argument("--reset-hold-ms", type=int, default=200)
     parser.add_argument(
@@ -441,8 +510,8 @@ def parse_args() -> argparse.Namespace:
         "--strict-oracle",
         action="store_true",
         help=(
-            "before every shot prove no-password denial after destructive reset, "
-            "then require correct-password recovery after every no-access result"
+            "before every shot require a fresh cold-cycle/IDCODE gate, then "
+            "require correct-password recovery after every no-access result"
         ),
     )
     parser.add_argument(
@@ -461,15 +530,26 @@ def validate_args(args: argparse.Namespace) -> None:
     edge_low, edge_high = args.edge_range
     if edge_low < 1 or edge_high < edge_low:
         raise ExperimentError("invalid --edge-range")
-    if args.mode != "controls" and not args.rpico:
+    pico_modes = {"edge-map", "characterize", "sensitivity-map", "attack"}
+    if args.mode in pico_modes and not args.rpico:
         raise ExperimentError(f"{args.mode} mode requires --rpico")
+    if args.mode == "power-cycle-test" and not args.power_relay_port:
+        raise ExperimentError("power-cycle-test requires --power-relay-port")
+    if args.mode in ("characterize", "sensitivity-map", "attack"):
+        if not args.power_relay_port:
+            raise ExperimentError(
+                f"{args.mode} requires a real 12 V target power cycle via "
+                "--power-relay-port; DCI/nTRST/nSRST proved insufficient"
+            )
     if args.mode == "edge-map":
         if not args.confirm_glitch_disconnected:
             raise ExperimentError(
                 "edge-map requires --confirm-glitch-disconnected after physically "
                 "disconnecting GLITCH from the target rail"
             )
-    elif args.mode != "controls" and (args.edge_count is None or args.edge_count < 1):
+    elif args.mode not in ("controls", "power-cycle-test") and (
+        args.edge_count is None or args.edge_count < 1
+    ):
         raise ExperimentError(
             "characterize/sensitivity-map/attack require one positive --edge-count"
         )
@@ -487,6 +567,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ExperimentError("--repeats must be positive")
     if args.adapter_speed_khz <= 0:
         raise ExperimentError("--adapter-speed-khz must be positive")
+    if args.relay_baud <= 0:
+        raise ExperimentError("--relay-baud must be positive")
+    if args.relay_on_state == args.relay_off_state:
+        raise ExperimentError("relay on/off states must differ")
+    if args.power_off_seconds <= 0 or args.power_settle_seconds <= 0:
+        raise ExperimentError("power-cycle durations must be positive")
     if args.reset_hold_ms < 0:
         raise ExperimentError("--reset-hold-ms cannot be negative")
     if args.health_retries < 0:
@@ -498,6 +584,7 @@ def validate_args(args: argparse.Namespace) -> None:
 def main() -> int:
     args = parse_args()
     session: SPC584BJtag | None = None
+    relay: SerialPowerRelay | None = None
     output_file = None
     try:
         validate_args(args)
@@ -505,6 +592,33 @@ def main() -> int:
         password = read_password(args.password_file)
         correct_words = password_words(password, wrong=False)
         wrong_words = password_words(password, wrong=True)
+
+        if args.power_relay_port:
+            relay = SerialPowerRelay(
+                args.power_relay_port,
+                baudrate=args.relay_baud,
+                on_state=args.relay_on_state,
+                off_state=args.relay_off_state,
+                off_seconds=args.power_off_seconds,
+                settle_seconds=args.power_settle_seconds,
+            ).open()
+
+        power_cycle = relay.power_cycle if relay is not None else None
+
+        if args.mode == "power-cycle-test":
+            assert relay is not None
+            print("MODE=power-cycle-test", flush=True)
+            print("POWER_SOURCE=SPC584B_DISP_12V_DC_INPUT", flush=True)
+            print("POWER_CONTROLLER=SERIAL_AT_CH1_RELAY", flush=True)
+            session = SPC584BJtag(
+                frequency_hz=args.adapter_speed_khz * 1000,
+                serial=args.ftdi_serial,
+                power_cycle=power_cycle,
+            ).__enter__()
+            verify_power_relay(session, relay, args)
+            run_controls(session, correct_words, wrong_words, args)
+            print("EXPERIMENT_RESULT=POWER_CYCLE_TEST_PASS", flush=True)
+            return EXIT_NO_CANDIDATE
 
         if args.mode == "controls":
             print("MODE=controls", flush=True)
@@ -514,6 +628,7 @@ def main() -> int:
             session = SPC584BJtag(
                 frequency_hz=args.adapter_speed_khz * 1000,
                 serial=args.ftdi_serial,
+                power_cycle=power_cycle,
             ).__enter__()
             print(f"RAW_IDCODE=0x{session.require_idcode():08x}", flush=True)
             run_controls(session, correct_words, wrong_words, args)
@@ -553,15 +668,19 @@ def main() -> int:
         print("PASSWORD_SCAN=UNINTERRUPTED_256_BIT_DRSCAN", flush=True)
         print("TRIGGER_REFERENCE=TCK_EDGES_AFTER_PASSWORD_IR_SELECTION", flush=True)
         print("JTAG_CONTROLLER=EXTERNAL_FTDI_PERSISTENT_PYFTDI_RAW", flush=True)
-        print(
-            "TARGET_REARM=DCI_DESTRUCTIVE_RESET_PLUS_RAW_TAP_RESET",
-            flush=True,
+        target_rearm = (
+            "FULL_12V_RELAY_POWER_CYCLE_PLUS_RAW_TAP_RESET"
+            if power_cycle is not None
+            else "DCI_DESTRUCTIVE_RESET_PLUS_RAW_TAP_RESET"
         )
+        print(f"TARGET_REARM={target_rearm}", flush=True)
         if args.strict_oracle:
-            print(
-                "PRE_SHOT_GATE=EXPECTED_IDCODE_NO_JUN_FRESH_RESET",
-                flush=True,
+            pre_shot_gate = (
+                "EXPECTED_IDCODE_AFTER_FULL_POWER_CYCLE"
+                if power_cycle is not None
+                else "EXPECTED_IDCODE_NO_JUN_FRESH_RESET"
             )
+            print(f"PRE_SHOT_GATE={pre_shot_gate}", flush=True)
             print(
                 "POST_SHOT_ORACLE=DIRECT_NEXUS_LCSTAT_X3_CORRECT_PASSWORD_RECOVERY",
                 flush=True,
@@ -574,7 +693,11 @@ def main() -> int:
         session = SPC584BJtag(
             frequency_hz=args.adapter_speed_khz * 1000,
             serial=args.ftdi_serial,
+            power_cycle=power_cycle,
         ).__enter__()
+        if args.mode in ("characterize", "sensitivity-map", "attack"):
+            assert relay is not None
+            verify_power_relay(session, relay, args)
         run_controls(session, correct_words, wrong_words, args)
 
         if args.mode == "edge-map":
@@ -646,6 +769,7 @@ def main() -> int:
                 session = SPC584BJtag(
                     frequency_hz=args.adapter_speed_khz * 1000,
                     serial=args.ftdi_serial,
+                    power_cycle=power_cycle,
                 ).__enter__()
                 run_controls(session, correct_words, wrong_words, args)
                 result = run_glitched_submission(
@@ -756,6 +880,8 @@ def main() -> int:
             output_file.close()
         if session is not None:
             session.close()
+        if relay is not None:
+            relay.close(ensure_on=True)
 
 
 if __name__ == "__main__":

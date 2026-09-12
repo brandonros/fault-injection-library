@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import time
+from typing import Callable
 
 import libusb_package
 from pyftdi.bits import BitSequence
@@ -82,9 +83,15 @@ class AccessProbe:
 class SPC584BJtag:
     """Persistent raw-JTAG controller for one SPC584B-DISP board."""
 
-    def __init__(self, frequency_hz: int = 1_000_000, serial: str | None = None):
+    def __init__(
+        self,
+        frequency_hz: int = 1_000_000,
+        serial: str | None = None,
+        power_cycle: Callable[[], None] | None = None,
+    ):
         self.frequency_hz = frequency_hz
         self.serial = serial
+        self.power_cycle = power_cycle
         self.engine: JtagEngine | None = None
         self.device = None
         self._in_once = False
@@ -167,8 +174,8 @@ class SPC584BJtag:
                     )
                     self.engine.sync()
                 except Exception:
-                    # Startup asserts both reset lines, so cleanup failure
-                    # cannot contaminate the next process.
+                    # A configured cold cycle recovers the target before the
+                    # next transaction even if best-effort cleanup fails.
                     pass
                 self.engine.close()
             finally:
@@ -241,9 +248,13 @@ class SPC584BJtag:
         return observed
 
     def destructive_reset(self, hold_ms: int = 200) -> None:
-        """Re-arm password security through the SPC DCI control register."""
+        """Cold-cycle when configured; otherwise use the limited DCI reset."""
         if self._in_once:
             self.release_once()
+        if self.power_cycle is not None:
+            self.power_cycle()
+            self.reset_lines_and_tap(hold_ms=100)
+            return
         self.tap_reset()
         self._ir(IR_DCI_CONTROL)
         self._dr_write(DCI_DESTRUCTIVE_RESET, 32)

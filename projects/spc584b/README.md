@@ -5,26 +5,27 @@ SPC584B-DISP FTDI directly. It does not launch a debugger daemon. The Python
 code owns every JTAG state transition and implements the complete path used by
 the campaign:
 
-1. assert the SPC584B DCI destructive reset to re-arm password security;
-2. cycle the FTDI-controlled nTRST/nSRST lines and reset the main TAP;
-3. require the exact raw IDCODE `0x20144041`;
-4. select JTAGC instruction `0x07`;
-5. shift one uninterrupted 256-bit password scan;
-6. enter core-2 OnCE with JTAGC instruction `0x2a`;
-7. select OnCE Nexus3 access with 10-bit command `0x07c`;
-8. read `PASS_LCSTAT` at `0xf7ff4000` three times through Nexus;
-9. report access only when all reads are stable, valid, free of a Nexus bus
+1. keep one external FTDI JTAG object open;
+2. cold-cycle the target through a serial relay in its 12 V DC input;
+3. cycle the FTDI-controlled nTRST/nSRST lines and reset the main TAP;
+4. require the exact raw IDCODE `0x20144041`;
+5. select JTAGC instruction `0x07`;
+6. arm the Pico edge trigger;
+7. shift one uninterrupted 256-bit password scan;
+8. enter core-2 OnCE with JTAGC instruction `0x2a`;
+9. select OnCE Nexus3 access with 10-bit command `0x07c`;
+10. read `PASS_LCSTAT` at `0xf7ff4000` three times through Nexus;
+11. report access only when all reads are stable, valid, free of a Nexus bus
    error, and LCSTAT bit 30 (`JUN`) is set.
 
 No CPU halt request, process-state cache, socket, or timeout is used as an
 authorization result. The raw implementation is in `jtag_pyftdi.py`. The
 campaign is in `spc584b_password_glitch.py`.
 
-Each process now asserts the board FTDI's nTRST/nSRST signals before its first
-transaction and releases OnCE ownership before closing. This prevents an
-auxiliary TAP selected by the preceding run from contaminating the next run.
-This startup cleanup was added after an unglitched correct-password control
-caught that condition and safely aborted before arming the Pico.
+Each process asserts the board FTDI's nTRST/nSRST signals before its first
+transaction and releases OnCE ownership before closing. This is useful TAP
+cleanup, but it is not a substitute for removing target power. Campaign modes
+refuse to run without the external relay.
 
 The code never writes flash, UTEST, DCF, lifecycle, or OTP.
 
@@ -35,8 +36,15 @@ The code never writes flash, UTEST, DCF, lifecycle, or OTP.
 - Pico `GLITCH` SMA center to the VDD_LV pad of C43
 - Pico `GLITCH` SMA shield to the GND pad of C43
 - Pico `RESET` and `VTARGET` disconnected
-- Board independently powered from its wall adapter
+- Board powered by its normal 12 V wall adapter, with an isolated serial-relay
+  contact wired in series with one conductor of the low-voltage 12 V DC lead
 - Board's onboard FTDI connected over USB
+
+Switch only the low-voltage DC lead. Do not put the relay or any Pico Glitcher
+connection on AC mains. The SPC584B-DISP input is 12 V, while Pico Glitcher v3
+offers target rails only up to 5 V, so do not connect the board's 12 V input to
+Pico `VTARGET` or `VCC_EXTERN`. Keep USB attached to the onboard FTDI so the
+same PyFtdi object survives target power cycles.
 
 C43 is a capacitor, not a resistor. On the stock discovery board it is 2.2 uF
 between VDD_LV and GND. Verify the VDD_LV pad by continuity to TP8 and verify
@@ -57,7 +65,25 @@ chmod 600 /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin
 The project pins PyFtdi, PyUSB, and a packaged libusb runtime. No system daemon
 or external debugger executable is required.
 
-## Mandatory raw-JTAG controls
+## Mandatory power-cycle test
+
+After connecting the relay over USB, find its serial port with `ls /dev/cu.*`.
+Then run this before a campaign, substituting its actual port:
+
+```bash
+.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
+  --mode power-cycle-test \
+  --power-relay-port /dev/cu.usbserial-RELAY \
+  --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin
+```
+
+The relay protocol and timing mirror the MPC574X relay path: `AT+CH1=1` for
+1.5 seconds, then `AT+CH1=0` and a 4-second settle. The test must show the
+expected IDCODE while on, a different or unreadable IDCODE while off, the
+expected IDCODE after restoration, and `POWER_CYCLE_TEST_PASS`. Campaign modes
+also repeat this physical proof at startup.
+
+## Raw-JTAG controls
 
 Run this before another glitch attempt:
 
@@ -81,8 +107,8 @@ EXPERIMENT_RESULT=CONTROLS_PASS
 
 The correct control proves the password word order, OnCE route, Nexus
 transactions, target byte order, LCSTAT address, and JUN mask through the raw
-Python implementation. The wrong control proves that a destructive reset
-re-arms security and that one changed password bit does not set JUN. The final
+Python implementation. The wrong control proves that reset re-arms security
+and that one changed password bit does not set JUN. The final
 correct-password control proves recovery from that denied state in the same
 persistent PyFtdi session. A campaign must not run if any control fails.
 
@@ -95,7 +121,7 @@ recovery in the same persistent session again returned three stable
 `LCSTAT=0xe0000002` reads with `RWCS=0x10c00005`, `JUN=1`, and no transport
 error. The complete raw harness acceptance sequence therefore passes.
 
-## Characterize the connected crowbar
+## What the pre-relay runs established
 
 The raw 20 us authority run on 2026-09-12 changed all five correct-password
 shots from valid LCSTAT data to stable all-ones LCSTAT/RWCS data. Every shot
@@ -122,6 +148,15 @@ and all five recovered. The 2 us failure is therefore independent of password
 comparison timing and is excluded as a bypass signal. It establishes only a
 generic target or JTAG-path collapse threshold.
 
+Those observations used DCI plus nTRST/nSRST between attempts. They are
+provisional because the interrupted 100 ns-step scan proved that reset path is
+not reliable. At attempt 28, a 1.4 us shot returned zero LCSTAT/RWCS data and
+the immediate correct-password recovery also returned zero. The next process
+then failed its unglitched correct-password control in the same way. This is
+evidence of a wedged or incompletely reset target, not an authentication
+result. Do not use that partial CSV to claim a 1.4-2.0 us boundary. Rerun the
+map only after the relay preflight passes.
+
 The recorded command was:
 
 ```bash
@@ -137,9 +172,10 @@ The recorded command was:
   --output projects/spc584b/run-artifacts/raw-authority-lp-20us-repeat5.csv
 ```
 
-For every shot, strict mode first proves that a fresh destructive reset has not
-left JUN set. After every changed result it resets again and requires the
-correct password to restore stable `LCSTAT.JUN=1`. This distinguishes a
+For every shot, strict mode performs one full cold cycle, requires the expected
+IDCODE, then arms the Pico and starts the password scan. After every changed
+result it cold-cycles again and requires the correct password to restore stable
+`LCSTAT.JUN=1`. This distinguishes a
 recoverable electrical effect from persistent harness failure. It still does
 not show whether the target brownouted or whether the password comparison was
 disturbed.
@@ -156,6 +192,7 @@ range with successive authority tests.
 .venv/bin/python projects/spc584b/spc584b_password_glitch.py \
   --mode sensitivity-map \
   --rpico /dev/cu.usbmodem1301 \
+  --power-relay-port /dev/cu.usbserial-RELAY \
   --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
   --edge-count 260 \
   --delay MIN_DELAY_NS MAX_DELAY_NS \
@@ -169,6 +206,24 @@ range with successive authority tests.
 The `SENSITIVITY_BOUNDARY` lines identify changed cells directly adjacent to
 cells where the correct password still sets JUN.
 
+After the power-cycle test passes, rerun the interrupted narrow map into a new
+file:
+
+```bash
+.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
+  --mode sensitivity-map \
+  --rpico /dev/cu.usbmodem1301 \
+  --power-relay-port /dev/cu.usbserial-RELAY \
+  --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
+  --edge-count 260 \
+  --delay 0 0 \
+  --length 1000 2000 \
+  --step-ns 100 \
+  --repeats 5 \
+  --strict-oracle \
+  --output projects/spc584b/run-artifacts/raw-edge260-width-100ns-coldcycle.csv
+```
+
 ## Attack
 
 Only after locating a repeatable correct-password boundary should the script
@@ -178,6 +233,7 @@ submit the one-bit-wrong password in the same timing region:
 .venv/bin/python projects/spc584b/spc584b_password_glitch.py \
   --mode attack \
   --rpico /dev/cu.usbmodem1301 \
+  --power-relay-port /dev/cu.usbserial-RELAY \
   --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
   --edge-count 260 \
   --delay MIN_DELAY_NS MAX_DELAY_NS \

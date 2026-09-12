@@ -1,10 +1,12 @@
 import unittest
+from unittest.mock import patch
 
 from jtag_pyftdi import (
     LCSTAT_JUN,
     NEXUS_RWCS_ERROR,
     SPC584BJtag,
 )
+from power_relay import SerialPowerRelay
 
 
 class RawJtagTests(unittest.TestCase):
@@ -72,6 +74,54 @@ class RawJtagTests(unittest.TestCase):
             ["release_once", "deassert_reset", "sync", "close"],
         )
         self.assertIsNone(jtag.engine)
+
+    def test_configured_power_cycle_replaces_dci_reset(self):
+        events = []
+        jtag = SPC584BJtag(power_cycle=lambda: events.append("power_cycle"))
+        jtag._in_once = True
+        jtag.release_once = lambda: events.append("release_once")
+        jtag.reset_lines_and_tap = lambda hold_ms: events.append(
+            f"reset_lines:{hold_ms}"
+        )
+        jtag.tap_reset = lambda: self.fail("DCI fallback must not run")
+
+        jtag.destructive_reset()
+
+        self.assertEqual(
+            events,
+            ["release_once", "power_cycle", "reset_lines:100"],
+        )
+
+    @patch("power_relay.time.sleep", return_value=None)
+    def test_serial_relay_uses_mpc574x_at_protocol(self, _sleep):
+        class FakeSerial:
+            def __init__(self, *_args, **_kwargs):
+                self.writes = []
+
+            def reset_input_buffer(self):
+                pass
+
+            def write(self, data):
+                self.writes.append(data)
+
+            def flush(self):
+                pass
+
+            def read(self, _size):
+                return b"OK\r\n"
+
+            def close(self):
+                pass
+
+        fake = FakeSerial()
+        relay = SerialPowerRelay(
+            "/dev/fake",
+            serial_factory=lambda *_args, **_kwargs: fake,
+        ).open()
+        relay.power_cycle()
+        relay.close(ensure_on=False)
+
+        self.assertEqual(fake.writes, [b"AT+CH1=1\r\n", b"AT+CH1=0\r\n"])
 
 
 if __name__ == "__main__":
