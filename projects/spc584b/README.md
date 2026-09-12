@@ -110,6 +110,12 @@ with three repetitions per cell. The 1 us cell passed 3/3. Every cell from
 with the correct password. The coarse transition is therefore between 1 us and
 2 us; the uniform behavior above 2 us continues to look like rail collapse.
 
+A temporal control then applied the same 2 us pulse 100 us after the final
+password edge. All five shots still produced stable all-ones LCSTAT/RWCS data
+and all five recovered. The 2 us failure is therefore independent of password
+comparison timing and is excluded as a bypass signal. It establishes only a
+generic target or JTAG-path collapse threshold.
+
 The recorded command was:
 
 ```bash
