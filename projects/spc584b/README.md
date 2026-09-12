@@ -308,6 +308,10 @@ At 1.876 us, a second reset-only wrong-password batch produced the ordinary
 locked zero LCSTAT/RWCS response 3/3, with all pre-shot gates and
 correct-password recoveries passing. The reset-only wrong-password transition
 at edge 260 and delay 0 is therefore bracketed between 1.876 and 1.908 us.
+At the 1.892 us midpoint, two of three shots returned invalid all-ones data and
+one returned the ordinary locked zero response. Every recovery passed and no
+shot set JUN. This is a mixed disruption boundary, so repeated sampling at the
+same point is required before refining nearby timings.
 
 An `ACCESS_CANDIDATE` requires three stable direct reads with LCSTAT.JUN set.
 The script stops without applying another reset so the authorization state can
