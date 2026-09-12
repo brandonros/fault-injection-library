@@ -346,6 +346,13 @@ observed. Longer PORST assertion and physical LD4 reset indication must be
 checked before relying on this path; otherwise a full power cycle remains
 necessary.
 
+A follow-up control run increased the requested FTDI PORST hold from 250 ms to
+1000 ms without cycling power. IDCODE remained healthy at `0x20144041`, but the
+first correct-password control still returned three zero LCSTAT/RWCS samples
+with `JUN=0`. Longer reset assertion therefore did not restore authentication.
+Observation of LD4 during the pulse is still required to distinguish a
+physically asserted but insufficient PORST from a board-routing problem.
+
 An `ACCESS_CANDIDATE` requires three stable direct reads with LCSTAT.JUN set.
 The script stops without applying another reset so the authorization state can
 be checked independently. Exit codes are 0 for no candidate, 10 for an access
