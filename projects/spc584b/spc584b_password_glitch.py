@@ -501,7 +501,7 @@ def parse_args() -> argparse.Namespace:
         "--reset-only-attack",
         action="store_true",
         help=(
-            "exploratory attack mode: use guarded DCI/nTRST/nSRST resets between "
+            "exploratory attack mode: use guarded FTDI PORST resets between "
             "shots and abort if correct-password recovery fails"
         ),
     )
@@ -511,7 +511,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--power-off-seconds", type=float, default=1.5)
     parser.add_argument("--power-settle-seconds", type=float, default=4.0)
     parser.add_argument("--adapter-speed-khz", type=int, default=1000)
-    parser.add_argument("--reset-hold-ms", type=int, default=200)
+    parser.add_argument("--reset-hold-ms", type=int, default=250)
     parser.add_argument(
         "--health-retries",
         type=int,
@@ -569,7 +569,7 @@ def validate_args(args: argparse.Namespace) -> None:
                 raise ExperimentError(
                     f"{args.mode} requires a real target power cycle via "
                     "--manual-power-cycle or --power-relay-port; "
-                    "DCI/nTRST/nSRST proved insufficient"
+                    "authoritative cold-cycle calibration is required"
                 )
     if args.mode == "edge-map":
         if not args.confirm_glitch_disconnected:
@@ -707,7 +707,7 @@ def main() -> int:
         print("JTAG_CONTROLLER=EXTERNAL_FTDI_PERSISTENT_PYFTDI_RAW", flush=True)
         if args.reset_only_attack:
             target_rearm = (
-                "GUARDED_DCI_DESTRUCTIVE_RESET_PLUS_RAW_TAP_RESET_"
+                "GUARDED_FTDI_EXTERNAL_PORST_PLUS_RAW_TAP_RESET_"
                 "ABORT_ON_RECOVERY_FAILURE"
             )
         elif power_controller is not None:
@@ -715,13 +715,18 @@ def main() -> int:
                 f"FULL_BOARD_POWER_CYCLE_{power_controller.name}_PLUS_RAW_TAP_RESET"
             )
         else:
-            target_rearm = "DCI_DESTRUCTIVE_RESET_PLUS_RAW_TAP_RESET"
+            target_rearm = "FTDI_EXTERNAL_PORST_PLUS_RAW_TAP_RESET"
         print(f"TARGET_REARM={target_rearm}", flush=True)
         if args.reset_only_attack:
             print(
                 "RESET_ASSURANCE=EXPLORATORY_ABORT_IF_STRICT_RECOVERY_FAILS",
                 flush=True,
             )
+            print(
+                "PORST_CONTROL=FTDI_ACBUS1_SRST_OUT_ACBUS5_DIRECTION",
+                flush=True,
+            )
+            print(f"PORST_HOLD_MS={args.reset_hold_ms}", flush=True)
         if args.strict_oracle:
             pre_shot_gate = (
                 "EXPECTED_IDCODE_AFTER_FULL_POWER_CYCLE"

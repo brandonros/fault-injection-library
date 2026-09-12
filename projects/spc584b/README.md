@@ -7,7 +7,7 @@ the campaign:
 
 1. keep one external FTDI JTAG object open;
 2. cold-cycle the target with its S1 switch or a serial relay in its 12 V DC input;
-3. cycle the FTDI-controlled nTRST/nSRST lines and reset the main TAP;
+3. assert the FTDI-controlled external PORST signal and reset the main TAP;
 4. require the exact raw IDCODE `0x20144041`;
 5. select JTAGC instruction `0x07`;
 6. arm the Pico edge trigger;
@@ -22,10 +22,13 @@ No CPU halt request, process-state cache, socket, or timeout is used as an
 authorization result. The raw implementation is in `jtag_pyftdi.py`. The
 campaign is in `spc584b_password_glitch.py`.
 
-Each process asserts the board FTDI's nTRST/nSRST signals before its first
-transaction and releases OnCE ownership before closing. This is useful TAP
-cleanup, but it is not a substitute for removing target power. Campaign modes
-require either operator-confirmed S1 switching or an external relay.
+The board routes FTDI ACBUS1 (`SRST#_O`) through level shifter U23 to the
+`USB_SRST#`/`RESET`/MCU `PORST` net. FTDI ACBUS5 is only U23's direction
+control. The current transport drives ACBUS1 low, selects A-to-B direction on
+ACBUS5 for 250 ms, releases the net by selecting B-to-A direction, and then
+resets the TAP. Earlier revisions incorrectly treated ACBUS5 as the reset
+output, so they did not assert PORST. Full cold cycles remain the authoritative
+campaign method until the corrected PORST path passes bench recovery testing.
 
 The code never writes flash, UTEST, DCF, lifecycle, or OTP.
 
@@ -90,8 +93,10 @@ The bench acceptance run on 2026-09-12 passed. With S1 on, raw IDCODE was
 returned to `0x20144041`. Three separately cold-booted controls then produced
 correct-password `ACCESS_JUN_SET`, one-bit-wrong-password zero LCSTAT/RWCS
 data with `JUN=0`, and correct-password recovery `ACCESS_JUN_SET`. This proves
-the manual switch supplies the full reset that DCI plus nTRST/nSRST could not
-reliably provide.
+the manual switch supplies a reliable full reset. A later schematic audit
+found that the earlier FTDI implementation had not actually driven PORST, so
+those results do not establish whether correctly asserted PORST can replace a
+full power cycle.
 
 Do not power the SPC584B-DISP through Pico's 5 V output. The board input expects
 12 V, direct injection into its internal 5 V net would backfeed the buck
@@ -162,14 +167,15 @@ and all five recovered. The 2 us failure is therefore independent of password
 comparison timing and is excluded as a bypass signal. It establishes only a
 generic target or JTAG-path collapse threshold.
 
-Those observations used DCI plus nTRST/nSRST between attempts. They are
-provisional because the interrupted 100 ns-step scan proved that reset path is
-not reliable. At attempt 28, a 1.4 us shot returned zero LCSTAT/RWCS data and
-the immediate correct-password recovery also returned zero. The next process
-then failed its unglitched correct-password control in the same way. This is
-evidence of a wedged or incompletely reset target, not an authentication
-result. Do not use that partial CSV to claim a 1.4-2.0 us boundary. Rerun the
-map only after a full cold-cycle preflight passes.
+Those observations intended to use DCI plus nTRST/nSRST between attempts, but
+a later schematic audit found that the raw FTDI mapping did not assert PORST:
+ACBUS5 was driven as though it were reset data even though it controls U23's
+direction, while the actual ACBUS1 `SRST#_O` pin was never driven. At attempt
+28, a 1.4 us shot returned zero LCSTAT/RWCS data and the immediate
+correct-password recovery also returned zero. The next process then failed its
+unglitched correct-password control in the same way. This is evidence of the
+incomplete pre-fix reset path, not an authentication result. Do not use that
+partial CSV to claim a 1.4-2.0 us boundary.
 
 The manual cold-cycle endpoint map then repeated the measurement with a full
 S1 cycle before every shot. At edge 260 and delay 0, 1 us passed 2/2 with
@@ -273,9 +279,9 @@ submit the one-bit-wrong password in the same timing region:
 ```
 
 For exploratory batches without repeated manual S1 prompts, attack mode can
-use guarded DCI/nTRST/nSRST resets. Strict mode proves a locked state before
-each shot and correct-password recovery after every denial. The run aborts
-instead of continuing if either gate fails:
+use the FTDI-controlled external PORST signal. Strict mode proves a locked
+state before each shot and correct-password recovery after every denial. The
+run aborts instead of continuing if either gate fails:
 
 ```bash
 .venv/bin/python projects/spc584b/spc584b_password_glitch.py \
@@ -291,11 +297,14 @@ instead of continuing if either gate fails:
   --strict-oracle
 ```
 
-This batch mode avoids routine power-switch operation. A recovery failure
-still requires one full power cycle before another run, and any access
-candidate must be reproduced with the full cold-cycle method.
+This batch mode avoids routine power-switch operation. It asserts PORST for
+250 ms using ACBUS1 as reset data and ACBUS5 as the level-shifter direction.
+A recovery failure still requires one full power cycle before another run,
+and any access candidate must be reproduced with the full cold-cycle method.
 
-The first reset-only attack batch used the one-bit-wrong password at edge 260,
+The following reset-only results were collected before the ACBUS1/ACBUS5 PORST
+mapping was corrected and describe the former DCI/TAP reset path. The first
+batch used the one-bit-wrong password at edge 260,
 delay 0, and width 1.908 us. All ten pre-shot gates showed the expected locked
 zero LCSTAT/RWCS data. All ten shots returned invalid all-ones data, and all
 ten DCI-reset correct-password recoveries restored stable `JUN=1`. The batch
@@ -317,9 +326,9 @@ A planned 20-shot repeat at 1.892 us then stopped after attempt 9 when strict
 correct-password recovery failed. Of the ten completed shots, seven returned
 invalid all-ones data and three returned the ordinary locked zero response;
 none set JUN. The first nine recoveries passed, while the tenth remained at
-zero after DCI/nTRST/nSRST. This is direct evidence that reset-only batching
-cannot run indefinitely at the mixed boundary. The guard prevented further
-shots, and a full target power cycle is required before continuing.
+zero after the pre-fix DCI/TAP reset. This proves the abort guard and the
+former reset path's limitation; it does not characterize the corrected PORST
+implementation.
 
 An `ACCESS_CANDIDATE` requires three stable direct reads with LCSTAT.JUN set.
 The script stops without applying another reset so the authorization state can

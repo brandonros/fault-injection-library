@@ -22,16 +22,15 @@ import usb.util
 USB_VID = 0x263D
 USB_PID = 0x4001
 USB_INTERFACE = 1  # FTDI channel 0 / interface index 1 in libusb
-FTDI_HIGH_NTRST = 1 << 0
-FTDI_HIGH_NSRST = 1 << 5
+FTDI_HIGH_TRST_OUT = 1 << 0  # ACBUS0 / TRST#_O
+FTDI_HIGH_SRST_OUT = 1 << 1  # ACBUS1 / SRST#_O
+FTDI_HIGH_SRST_DIR = 1 << 5  # ACBUS5 / SRST#_DIR
 
 JTAGC_IR_LENGTH = 6
 IR_IDCODE = 0x01
 IR_PASSWORD = 0x07
-IR_DCI_CONTROL = 0x0E
 IR_ACCESS_CORE_2 = 0x2A
 
-DCI_DESTRUCTIVE_RESET = 1 << 8
 ONCE_IR_LENGTH = 10
 ONCE_NEXUS3 = 0x07C
 ONCE_NONE = 0x011
@@ -151,7 +150,7 @@ class SPC584BJtag:
             # A previous process may have closed while an auxiliary OnCE TAP
             # owned the chain. Hardware reset both target-facing reset lines so
             # a new process always starts from the main JTAGC TAP.
-            self.reset_lines_and_tap(hold_ms=100)
+            self.reset_lines_and_tap(hold_ms=250)
             return self
         except Exception:
             try:
@@ -204,18 +203,25 @@ class SPC584BJtag:
         self._in_once = False
 
     def _set_reset_lines(self, *, trst_asserted: bool, srst_asserted: bool) -> None:
-        """Drive the board FTDI's nTRST and open-drain nSRST signals."""
+        """Drive nTRST and the board RESET/PORST net through the FTDI."""
         engine = self._require_engine()
-        value = 0 if trst_asserted else FTDI_HIGH_NTRST
-        direction = FTDI_HIGH_NTRST
+        value = 0 if trst_asserted else FTDI_HIGH_TRST_OUT
+        direction = FTDI_HIGH_TRST_OUT | FTDI_HIGH_SRST_DIR
+
+        # U23 is an SN74LVC1T45 between FTDI ACBUS1 (SRST#_O) and the target's
+        # USB_SRST#/RESET/PORST net. ACBUS5 is SRST#_DIR: high selects A->B and
+        # low selects B->A. To assert reset, make ACBUS1 an output-low and set
+        # ACBUS5 high. To release it, make ACBUS1 an input and set ACBUS5 low;
+        # this avoids driving high against the board's open-drain reset sources.
         if srst_asserted:
-            direction |= FTDI_HIGH_NSRST
+            direction |= FTDI_HIGH_SRST_OUT
+            value |= FTDI_HIGH_SRST_DIR
         engine.controller.ftdi.write_data(
             bytearray((Ftdi.SET_BITS_HIGH, value, direction))
         )
 
-    def reset_lines_and_tap(self, hold_ms: int = 20) -> None:
-        """Reset the target/JTAG path using the FTDI pins, then reset the TAP."""
+    def reset_lines_and_tap(self, hold_ms: int = 250) -> None:
+        """Assert external PORST through the FTDI, release it, then reset TAP."""
         self._set_reset_lines(trst_asserted=True, srst_asserted=True)
         time.sleep(hold_ms / 1000)
         self._set_reset_lines(trst_asserted=False, srst_asserted=False)
@@ -247,22 +253,15 @@ class SPC584BJtag:
             )
         return observed
 
-    def destructive_reset(self, hold_ms: int = 200) -> None:
-        """Cold-cycle when configured; otherwise use the limited DCI reset."""
+    def destructive_reset(self, hold_ms: int = 250) -> None:
+        """Cold-cycle when configured; otherwise assert external PORST."""
         if self._in_once:
             self.release_once()
         if self.power_cycle is not None:
             self.power_cycle()
             self.reset_lines_and_tap(hold_ms=100)
             return
-        self.tap_reset()
-        self._ir(IR_DCI_CONTROL)
-        self._dr_write(DCI_DESTRUCTIVE_RESET, 32)
-        time.sleep(hold_ms / 1000)
-        self._ir(IR_DCI_CONTROL)
-        self._dr_write(0, 32)
-        time.sleep(hold_ms / 1000)
-        self.reset_lines_and_tap()
+        self.reset_lines_and_tap(hold_ms=hold_ms)
 
     @staticmethod
     def password_wire_value(words: tuple[int, ...]) -> int:
