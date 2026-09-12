@@ -190,8 +190,10 @@ returned invalid all-ones LCSTAT/RWCS samples, and all three restored correct
 password access after another cold cycle. A 1.908 us test passed 3/3 with
 stable, valid access. A 1.924 us test returned the same recoverable invalid
 all-ones samples 3/3. The validated bracket is therefore 1.908-1.924 us. This
-remains an electrical-effect boundary; it is not evidence that an incorrect
-password can set JUN.
+was narrowed again when 1.916 us produced recoverable invalid all-ones samples
+3/3. The validated bracket is now 1.908-1.916 us. This remains an
+electrical-effect boundary; it is not evidence that an incorrect password can
+set JUN.
 
 The recorded command was:
 
