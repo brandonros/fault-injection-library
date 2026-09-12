@@ -347,11 +347,14 @@ checked before relying on this path; otherwise a full power cycle remains
 necessary.
 
 A follow-up control run increased the requested FTDI PORST hold from 250 ms to
-1000 ms without cycling power. IDCODE remained healthy at `0x20144041`, but the
-first correct-password control still returned three zero LCSTAT/RWCS samples
-with `JUN=0`. Longer reset assertion therefore did not restore authentication.
-Observation of LD4 during the pulse is still required to distinguish a
-physically asserted but insufficient PORST from a board-routing problem.
+1000 ms while the target remained in that post-fault state. IDCODE remained
+healthy at `0x20144041`, but the first correct-password control still returned
+three zero LCSTAT/RWCS samples with `JUN=0`. Longer reset assertion alone did
+not restore that state. After a full S1 power cycle, the same 1000 ms control
+run visibly asserted LD4 and passed correct/wrong/correct. This proves that the
+FTDI signal reaches the board RESET/PORST net and that PORST handles ordinary
+password-state rearming, while the observed faulted state still required a
+full power cycle.
 
 An `ACCESS_CANDIDATE` requires three stable direct reads with LCSTAT.JUN set.
 The script stops without applying another reset so the authorization state can
