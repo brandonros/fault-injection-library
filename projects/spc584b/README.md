@@ -179,6 +179,12 @@ This validates the 1-2 us electrical disruption bracket under the corrected
 reset method. The post-authentication control above still excludes the 2 us
 response as evidence of a password-comparison bypass.
 
+A midpoint authority test at 1.5 us then passed 3/3 across separate manual
+cold boots, with stable `LCSTAT=0xe0000002`, `RWCS=0x10c00005`, and `JUN=1`
+on every shot. The validated disruption bracket at edge 260 and delay 0 is
+therefore narrowed to 1.5-2.0 us. This remains an electrical-effect boundary;
+it is not evidence that an incorrect password can set JUN.
+
 The recorded command was:
 
 ```bash
