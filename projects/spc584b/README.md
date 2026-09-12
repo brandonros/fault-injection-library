@@ -304,6 +304,11 @@ under the reset-only attack conditions. Because both the password and reset
 regime differ from the cold-cycle correct-password map, this does not establish
 which difference moved the observed boundary.
 
+At 1.876 us, a second reset-only wrong-password batch produced the ordinary
+locked zero LCSTAT/RWCS response 3/3, with all pre-shot gates and
+correct-password recoveries passing. The reset-only wrong-password transition
+at edge 260 and delay 0 is therefore bracketed between 1.876 and 1.908 us.
+
 An `ACCESS_CANDIDATE` requires three stable direct reads with LCSTAT.JUN set.
 The script stops without applying another reset so the authorization state can
 be checked independently. Exit codes are 0 for no candidate, 10 for an access
