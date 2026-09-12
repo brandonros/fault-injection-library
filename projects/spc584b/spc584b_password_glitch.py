@@ -8,7 +8,7 @@ for a delayed pulse to land before, during, or after the final scan clocks.
 Six explicit modes are provided:
 
 * controls: validate raw IDCODE and correct/wrong-password LCSTAT behavior;
-* power-cycle-test: prove the external relay removes and restores target power;
+* power-cycle-test: prove the selected cold-cycle method removes target power;
 * edge-map: emit scope markers with the glitch lead physically disconnected;
 * characterize: send the correct password and stop on the first changed result;
 * sensitivity-map: map correct-password pass/fail behavior across a full grid;
@@ -35,7 +35,7 @@ import time
 from findus import PicoGlitcher
 from findus.pyboard import PyboardError
 from jtag_pyftdi import AccessProbe, SPC584BJtag
-from power_relay import SerialPowerRelay
+from power_relay import ManualPowerCycle, SerialPowerRelay
 
 
 EXPECTED_IDCODE = 0x20144041
@@ -115,19 +115,19 @@ def reset_and_verify_target(
     )
 
 
-def verify_power_relay(
+def verify_power_cycle(
     session: SPC584BJtag,
-    relay: SerialPowerRelay,
+    controller,
     args: argparse.Namespace,
 ) -> None:
-    """Prove that the relay removes and restores the target's JTAG power."""
-    relay.turn_on()
+    """Prove that the selected method removes and restores target power."""
+    controller.turn_on()
     time.sleep(args.power_settle_seconds)
     session.reset_lines_and_tap(hold_ms=100)
     before = session.require_idcode()
     print(f"POWER_ON_IDCODE=0x{before:08x}", flush=True)
 
-    relay.turn_off()
+    controller.turn_off()
     off_idcode: int | None = None
     off_error = ""
     try:
@@ -137,7 +137,7 @@ def verify_power_relay(
         except Exception as error:
             off_error = compact_error(error)
     finally:
-        relay.turn_on()
+        controller.turn_on()
         time.sleep(args.power_settle_seconds)
 
     if off_idcode is None:
@@ -150,7 +150,7 @@ def verify_power_relay(
     print(f"POWER_RESTORED_IDCODE=0x{after:08x}", flush=True)
     if off_idcode == EXPECTED_IDCODE:
         raise ExperimentError(
-            "relay did not remove target power: IDCODE remained valid while off"
+            "power control did not remove target power: IDCODE remained valid while off"
         )
 
 
@@ -416,7 +416,7 @@ def parse_args() -> argparse.Namespace:
         ),
         help=(
             "controls validates raw JTAG without firing the Pico; power-cycle-test "
-            "validates a 12 V relay; edge-map emits "
+            "validates manual or relay power cycling; edge-map emits "
             "safe scope markers; characterize faults a correct "
             "password and stops on change; sensitivity-map records the full "
             "correct-password grid; attack faults a one-bit-wrong password"
@@ -492,6 +492,11 @@ def parse_args() -> argparse.Namespace:
         "--power-relay-port",
         help="serial port for the AT+CH1 relay switching the board's 12 V DC feed",
     )
+    parser.add_argument(
+        "--manual-power-cycle",
+        action="store_true",
+        help="pause for manual use of the board's S1 ON/OFF switch each cycle",
+    )
     parser.add_argument("--relay-baud", type=int, default=9600)
     parser.add_argument("--relay-on-state", type=int, choices=(0, 1), default=0)
     parser.add_argument("--relay-off-state", type=int, choices=(0, 1), default=1)
@@ -533,13 +538,21 @@ def validate_args(args: argparse.Namespace) -> None:
     pico_modes = {"edge-map", "characterize", "sensitivity-map", "attack"}
     if args.mode in pico_modes and not args.rpico:
         raise ExperimentError(f"{args.mode} mode requires --rpico")
-    if args.mode == "power-cycle-test" and not args.power_relay_port:
-        raise ExperimentError("power-cycle-test requires --power-relay-port")
+    if args.power_relay_port and args.manual_power_cycle:
+        raise ExperimentError(
+            "choose only one of --power-relay-port and --manual-power-cycle"
+        )
+    has_cold_cycle = bool(args.power_relay_port or args.manual_power_cycle)
+    if args.mode == "power-cycle-test" and not has_cold_cycle:
+        raise ExperimentError(
+            "power-cycle-test requires --manual-power-cycle or --power-relay-port"
+        )
     if args.mode in ("characterize", "sensitivity-map", "attack"):
-        if not args.power_relay_port:
+        if not has_cold_cycle:
             raise ExperimentError(
-                f"{args.mode} requires a real 12 V target power cycle via "
-                "--power-relay-port; DCI/nTRST/nSRST proved insufficient"
+                f"{args.mode} requires a real target power cycle via "
+                "--manual-power-cycle or --power-relay-port; "
+                "DCI/nTRST/nSRST proved insufficient"
             )
     if args.mode == "edge-map":
         if not args.confirm_glitch_disconnected:
@@ -584,7 +597,7 @@ def validate_args(args: argparse.Namespace) -> None:
 def main() -> int:
     args = parse_args()
     session: SPC584BJtag | None = None
-    relay: SerialPowerRelay | None = None
+    power_controller = None
     output_file = None
     try:
         validate_args(args)
@@ -594,7 +607,7 @@ def main() -> int:
         wrong_words = password_words(password, wrong=True)
 
         if args.power_relay_port:
-            relay = SerialPowerRelay(
+            power_controller = SerialPowerRelay(
                 args.power_relay_port,
                 baudrate=args.relay_baud,
                 on_state=args.relay_on_state,
@@ -602,20 +615,27 @@ def main() -> int:
                 off_seconds=args.power_off_seconds,
                 settle_seconds=args.power_settle_seconds,
             ).open()
+        elif args.manual_power_cycle:
+            power_controller = ManualPowerCycle(
+                off_seconds=args.power_off_seconds,
+                settle_seconds=args.power_settle_seconds,
+            ).open()
 
-        power_cycle = relay.power_cycle if relay is not None else None
+        power_cycle = (
+            power_controller.power_cycle if power_controller is not None else None
+        )
 
         if args.mode == "power-cycle-test":
-            assert relay is not None
+            assert power_controller is not None
             print("MODE=power-cycle-test", flush=True)
             print("POWER_SOURCE=SPC584B_DISP_12V_DC_INPUT", flush=True)
-            print("POWER_CONTROLLER=SERIAL_AT_CH1_RELAY", flush=True)
+            print(f"POWER_CONTROLLER={power_controller.name}", flush=True)
             session = SPC584BJtag(
                 frequency_hz=args.adapter_speed_khz * 1000,
                 serial=args.ftdi_serial,
                 power_cycle=power_cycle,
             ).__enter__()
-            verify_power_relay(session, relay, args)
+            verify_power_cycle(session, power_controller, args)
             run_controls(session, correct_words, wrong_words, args)
             print("EXPERIMENT_RESULT=POWER_CYCLE_TEST_PASS", flush=True)
             return EXIT_NO_CANDIDATE
@@ -669,8 +689,8 @@ def main() -> int:
         print("TRIGGER_REFERENCE=TCK_EDGES_AFTER_PASSWORD_IR_SELECTION", flush=True)
         print("JTAG_CONTROLLER=EXTERNAL_FTDI_PERSISTENT_PYFTDI_RAW", flush=True)
         target_rearm = (
-            "FULL_12V_RELAY_POWER_CYCLE_PLUS_RAW_TAP_RESET"
-            if power_cycle is not None
+            f"FULL_BOARD_POWER_CYCLE_{power_controller.name}_PLUS_RAW_TAP_RESET"
+            if power_controller is not None
             else "DCI_DESTRUCTIVE_RESET_PLUS_RAW_TAP_RESET"
         )
         print(f"TARGET_REARM={target_rearm}", flush=True)
@@ -696,8 +716,8 @@ def main() -> int:
             power_cycle=power_cycle,
         ).__enter__()
         if args.mode in ("characterize", "sensitivity-map", "attack"):
-            assert relay is not None
-            verify_power_relay(session, relay, args)
+            assert power_controller is not None
+            verify_power_cycle(session, power_controller, args)
         run_controls(session, correct_words, wrong_words, args)
 
         if args.mode == "edge-map":
@@ -880,8 +900,8 @@ def main() -> int:
             output_file.close()
         if session is not None:
             session.close()
-        if relay is not None:
-            relay.close(ensure_on=True)
+        if power_controller is not None:
+            power_controller.close(ensure_on=True)
 
 
 if __name__ == "__main__":

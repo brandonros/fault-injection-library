@@ -11,8 +11,40 @@ class RelayError(RuntimeError):
     pass
 
 
+class ManualPowerCycle:
+    """Prompt the operator to use the SPC584B-DISP's main power switch."""
+
+    name = "MANUAL_BOARD_S1_SWITCH"
+
+    def __init__(self, *, off_seconds: float = 1.5, settle_seconds: float = 4.0):
+        self.off_seconds = off_seconds
+        self.settle_seconds = settle_seconds
+
+    def open(self) -> "ManualPowerCycle":
+        return self
+
+    def close(self, *, ensure_on: bool = True) -> None:
+        return None
+
+    def turn_off(self) -> str:
+        input("[MANUAL POWER] Switch board S1 OFF, then press Enter: ")
+        return "operator-confirmed-off"
+
+    def turn_on(self) -> str:
+        input("[MANUAL POWER] Switch board S1 ON, then press Enter: ")
+        return "operator-confirmed-on"
+
+    def power_cycle(self) -> None:
+        self.turn_off()
+        time.sleep(self.off_seconds)
+        self.turn_on()
+        time.sleep(self.settle_seconds)
+
+
 class SerialPowerRelay:
     """Control the AT+CH1 relay already used by the MPC574X rig."""
+
+    name = "SERIAL_AT_CH1_RELAY"
 
     def __init__(
         self,

@@ -6,7 +6,7 @@ code owns every JTAG state transition and implements the complete path used by
 the campaign:
 
 1. keep one external FTDI JTAG object open;
-2. cold-cycle the target through a serial relay in its 12 V DC input;
+2. cold-cycle the target with its S1 switch or a serial relay in its 12 V DC input;
 3. cycle the FTDI-controlled nTRST/nSRST lines and reset the main TAP;
 4. require the exact raw IDCODE `0x20144041`;
 5. select JTAGC instruction `0x07`;
@@ -25,7 +25,7 @@ campaign is in `spc584b_password_glitch.py`.
 Each process asserts the board FTDI's nTRST/nSRST signals before its first
 transaction and releases OnCE ownership before closing. This is useful TAP
 cleanup, but it is not a substitute for removing target power. Campaign modes
-refuse to run without the external relay.
+require either operator-confirmed S1 switching or an external relay.
 
 The code never writes flash, UTEST, DCF, lifecycle, or OTP.
 
@@ -67,21 +67,27 @@ or external debugger executable is required.
 
 ## Mandatory power-cycle test
 
-After connecting the relay over USB, find its serial port with `ls /dev/cu.*`.
-Then run this before a campaign, substituting its actual port:
+The no-solder method uses the board's existing S1 power switch. Keep the wall
+adapter and onboard FTDI USB connected, then run:
 
 ```bash
 .venv/bin/python projects/spc584b/spc584b_password_glitch.py \
   --mode power-cycle-test \
-  --power-relay-port /dev/cu.usbserial-RELAY \
+  --manual-power-cycle \
   --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin
 ```
 
-The relay protocol and timing mirror the MPC574X relay path: `AT+CH1=1` for
-1.5 seconds, then `AT+CH1=0` and a 4-second settle. The test must show the
+Follow each prompt by switching S1 to the stated position before pressing
+Enter. The script waits 1.5 seconds while off and 4 seconds after power-on.
+The test must show the
 expected IDCODE while on, a different or unreadable IDCODE while off, the
 expected IDCODE after restoration, and `POWER_CYCLE_TEST_PASS`. Campaign modes
-also repeat this physical proof at startup.
+also repeat this physical proof at startup. An `AT+CH1` USB relay remains an
+optional automation path through `--power-relay-port`.
+
+Do not power the SPC584B-DISP through Pico's 5 V output. The board input expects
+12 V, direct injection into its internal 5 V net would backfeed the buck
+converter, and Pico is not sized to power the complete discovery board.
 
 ## Raw-JTAG controls
 
@@ -192,7 +198,7 @@ range with successive authority tests.
 .venv/bin/python projects/spc584b/spc584b_password_glitch.py \
   --mode sensitivity-map \
   --rpico /dev/cu.usbmodem1301 \
-  --power-relay-port /dev/cu.usbserial-RELAY \
+  --manual-power-cycle \
   --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
   --edge-count 260 \
   --delay MIN_DELAY_NS MAX_DELAY_NS \
@@ -213,7 +219,7 @@ file:
 .venv/bin/python projects/spc584b/spc584b_password_glitch.py \
   --mode sensitivity-map \
   --rpico /dev/cu.usbmodem1301 \
-  --power-relay-port /dev/cu.usbserial-RELAY \
+  --manual-power-cycle \
   --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
   --edge-count 260 \
   --delay 0 0 \
@@ -233,7 +239,7 @@ submit the one-bit-wrong password in the same timing region:
 .venv/bin/python projects/spc584b/spc584b_password_glitch.py \
   --mode attack \
   --rpico /dev/cu.usbmodem1301 \
-  --power-relay-port /dev/cu.usbserial-RELAY \
+  --manual-power-cycle \
   --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
   --edge-count 260 \
   --delay MIN_DELAY_NS MAX_DELAY_NS \
