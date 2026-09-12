@@ -98,6 +98,57 @@ TAP failure, and disruption of the password check are not equivalent. Correlate
 the result with TCK and VDD_LV traces, then repeat a narrow neighborhood to
 establish that the effect is reproducible and non-destructive.
 
+### No-scope alternative: correct-password sensitivity map
+
+When scope calibration is intentionally skipped, map the correct-password
+pass/fail boundary before spending repetitions on the wrong-password path.
+This does not prove that VDD_LV moved, but it separates timing cells where the
+correct password remains accepted from cells where the pulse changes target
+behavior. Every completed attempt is flushed immediately to a CSV file.
+
+At 1 MHz JTAG, edge 260 is the computed `Update-DR` point for this uninterrupted
+256-bit scan. Run its complete 4 ns timing lattice with:
+
+```bash
+.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
+  --mode sensitivity-map \
+  --rpico /dev/cu.usbmodem1301 \
+  --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
+  --edge-count 260 \
+  --delay 0 1000 \
+  --length 8 28 \
+  --repeats 1 \
+  --output projects/spc584b/run-artifacts/edge260-sensitivity.csv
+```
+
+The final `SENSITIVITY_BOUNDARY` lines identify changed cells directly adjacent
+to stable accepted cells. Repeat a narrower region around those cells before
+using the same region in `attack` mode. The output path must not already exist;
+the script refuses to overwrite an earlier run.
+
+### Observed direct characterization, 2026-09-12
+
+The SPC584B-DIS was tested with its onboard PLS FTDI at 1 MHz, PicoGlitcher and
+findus 1.14.1 in low-power mode, TCK edge 260, delay 0 ns, and width 8 ns. Scope
+calibration was intentionally skipped. This command was run twice:
+
+```bash
+.venv/bin/python projects/spc584b/spc584b_password_glitch.py \
+  --mode characterize \
+  --rpico /dev/cu.usbmodem1301 \
+  --password-file /Users/brandon/Desktop/mpc/spc584b-jtag-password.bin \
+  --edge-count 260 \
+  --delay 0 0 \
+  --length 8 8 \
+  --attempts 1
+```
+
+Both runs passed the controls (`ACCESS_JUN_SET` for the correct password and
+`LOCKED_OR_UNRESPONSIVE` for the one-bit-wrong password). In both glitched
+correct-password shots, the result changed to `LOCKED_OR_UNRESPONSIVE`. This is
+a reproducible authentication-path disturbance, not evidence of wrong-password
+acceptance, and without a scope it does not establish the VDD_LV waveform.
+
 ## Stage 2: attack the wrong-password path
 
 After Stage 1 establishes a repeatable physical effect near the comparison,

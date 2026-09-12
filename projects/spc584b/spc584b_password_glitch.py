@@ -5,20 +5,23 @@ The experiment sends one uninterrupted 256-bit password scan. The Pico
 Glitcher counts TCK edges from the start of that scan and fires early enough
 for a delayed pulse to land before, during, or after the final scan clocks.
 
-Three explicit modes are provided:
+Four explicit modes are provided:
 
 * edge-map: emit scope markers with the glitch lead physically disconnected;
 * characterize: send the correct password and stop on the first changed result;
+* sensitivity-map: map correct-password pass/fail behavior across a full grid;
 * attack: send a one-bit-wrong password and stop on unexpected debug access.
 
 OpenOCD remains alive across attempts and is restarted only if its Tcl session
 becomes unusable. This script never writes flash, UTEST, DCF, lifecycle, or
-OTP. Results are printed to stdout; there is deliberately no campaign database.
+OTP. Results are printed to stdout. Sensitivity maps are also written to an
+explicit CSV path so an interrupted run retains every completed attempt.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 from collections import deque
 from dataclasses import dataclass
 import os
@@ -526,6 +529,69 @@ def build_points(args: argparse.Namespace) -> list[Point]:
     return points
 
 
+def summarize_sensitivity(
+    cells: dict[tuple[int, int], dict[str, int]], step_ns: int
+) -> None:
+    def accepted(counts: dict[str, int]) -> int:
+        return counts.get("ACCESS_JUN_SET", 0)
+
+    def changed(counts: dict[str, int]) -> int:
+        return sum(
+            count for state, count in counts.items() if state != "ACCESS_JUN_SET"
+        )
+
+    stable_pass = {
+        point
+        for point, counts in cells.items()
+        if accepted(counts) and not changed(counts)
+    }
+    stable_changed = {
+        point
+        for point, counts in cells.items()
+        if changed(counts) and not accepted(counts)
+    }
+    mixed = set(cells) - stable_pass - stable_changed
+    boundary = {
+        point
+        for point in stable_changed
+        if any(
+            neighbor in stable_pass
+            for neighbor in (
+                (point[0] - step_ns, point[1]),
+                (point[0] + step_ns, point[1]),
+                (point[0], point[1] - step_ns),
+                (point[0], point[1] + step_ns),
+            )
+        )
+    }
+
+    print(
+        "SENSITIVITY_SUMMARY "
+        f"cells={len(cells)} stable_pass={len(stable_pass)} "
+        f"stable_changed={len(stable_changed)} mixed={len(mixed)} "
+        f"boundary_changed={len(boundary)}",
+        flush=True,
+    )
+    for delay_ns, length_ns in sorted(mixed):
+        counts = cells[(delay_ns, length_ns)]
+        print(
+            "SENSITIVITY_MIXED "
+            f"delay_ns={delay_ns} length_ns={length_ns} "
+            f"accepted={accepted(counts)} changed={changed(counts)}",
+            flush=True,
+        )
+    for delay_ns, length_ns in sorted(boundary):
+        counts = cells[(delay_ns, length_ns)]
+        states = ",".join(
+            f"{state}:{count}" for state, count in sorted(counts.items())
+        )
+        print(
+            "SENSITIVITY_BOUNDARY "
+            f"delay_ns={delay_ns} length_ns={length_ns} states={states}",
+            flush=True,
+        )
+
+
 def apply_mode_defaults(args: argparse.Namespace) -> None:
     if args.repeats is None:
         args.repeats = 100 if args.mode == "attack" else 1
@@ -538,10 +604,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         required=True,
-        choices=("edge-map", "characterize", "attack"),
+        choices=("edge-map", "characterize", "sensitivity-map", "attack"),
         help=(
             "edge-map emits safe scope markers; characterize faults a correct "
-            "password; attack faults a one-bit-wrong password"
+            "password and stops on change; sensitivity-map records the full "
+            "correct-password grid; attack faults a one-bit-wrong password"
         ),
     )
     parser.add_argument("--rpico", required=True, help="Pico Glitcher serial port")
@@ -555,9 +622,7 @@ def parse_args() -> argparse.Namespace:
         "--edge-count",
         type=int,
         metavar="EDGE",
-        help=(
-            "one scope-calibrated TCK edge count for characterize/attack"
-        ),
+        help="one TCK edge count for characterize/sensitivity-map/attack",
     )
     parser.add_argument(
         "--edge-range",
@@ -586,15 +651,23 @@ def parse_args() -> argparse.Namespace:
         type=int,
         help=(
             "maximum shuffled attempts; 0 runs the complete grid "
-            "(defaults: characterize=complete grid, attack=100000)"
+            "(defaults: characterize/sensitivity-map=complete grid, attack=100000)"
         ),
     )
     parser.add_argument(
         "--repeats",
         type=int,
-        help="repetitions per grid point (defaults: characterize=1, attack=100)",
+        help=(
+            "repetitions per grid point "
+            "(defaults: characterize/sensitivity-map=1, attack=100)"
+        ),
     )
     parser.add_argument("--seed", type=int, default=584)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="new CSV output path (required for sensitivity-map)",
+    )
     parser.add_argument(
         "--trigger-input",
         default="default",
@@ -635,8 +708,12 @@ def validate_args(args: argparse.Namespace) -> None:
             )
     elif args.edge_count is None or args.edge_count < 1:
         raise ExperimentError(
-            "characterize/attack require one positive, scope-calibrated --edge-count"
+            "characterize/sensitivity-map/attack require one positive --edge-count"
         )
+    if args.mode == "sensitivity-map" and args.output is None:
+        raise ExperimentError("sensitivity-map requires --output")
+    if args.output is not None and args.mode != "sensitivity-map":
+        raise ExperimentError("--output is currently supported only by sensitivity-map")
     if args.marker_length_ns <= 0:
         raise ExperimentError("--marker-length-ns must be positive")
     if args.step_ns <= 0:
@@ -660,6 +737,7 @@ def validate_args(args: argparse.Namespace) -> None:
 def main() -> int:
     args = parse_args()
     session: OpenOCDSession | None = None
+    output_file = None
     try:
         validate_args(args)
         apply_mode_defaults(args)
@@ -728,7 +806,39 @@ def main() -> int:
         print(f"CALIBRATED_EDGE_COUNT={args.edge_count}", flush=True)
         print(f"POINTS_THIS_RUN={len(points)}", flush=True)
 
-        words = correct_words if args.mode == "characterize" else wrong_words
+        csv_writer = None
+        sensitivity_cells: dict[tuple[int, int], dict[str, int]] = {}
+        if args.mode == "sensitivity-map":
+            assert args.output is not None
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                output_file = args.output.open("x", newline="")
+            except FileExistsError as error:
+                raise ExperimentError(
+                    f"refusing to overwrite sensitivity CSV: {args.output}"
+                ) from error
+            csv_writer = csv.writer(output_file)
+            csv_writer.writerow(
+                (
+                    "timestamp_utc",
+                    "attempt",
+                    "edge_count",
+                    "delay_ns",
+                    "length_ns",
+                    "repeat",
+                    "result",
+                    "access_observed",
+                    "detail",
+                )
+            )
+            output_file.flush()
+            print(f"RESULTS_CSV={args.output}", flush=True)
+
+        words = (
+            correct_words
+            if args.mode in ("characterize", "sensitivity-map")
+            else wrong_words
+        )
         started = time.monotonic()
         for attempt, point in enumerate(points):
             try:
@@ -757,6 +867,27 @@ def main() -> int:
                 f"rate={(attempt + 1) / elapsed:.2f}/s detail={result.detail}",
                 flush=True,
             )
+
+            if csv_writer is not None:
+                csv_writer.writerow(
+                    (
+                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        attempt,
+                        args.edge_count,
+                        point.delay_ns,
+                        point.length_ns,
+                        point.repeat,
+                        result.state,
+                        int(result.access_observed),
+                        result.detail,
+                    )
+                )
+                assert output_file is not None
+                output_file.flush()
+                counts = sensitivity_cells.setdefault(
+                    (point.delay_ns, point.length_ns), {}
+                )
+                counts[result.state] = counts.get(result.state, 0) + 1
 
             if result.state == "TRIGGER_TIMEOUT":
                 raise ExperimentError(
@@ -787,6 +918,11 @@ def main() -> int:
                 )
                 return EXIT_CANDIDATE
 
+        if args.mode == "sensitivity-map":
+            summarize_sensitivity(sensitivity_cells, args.step_ns)
+            print("EXPERIMENT_RESULT=SENSITIVITY_MAP_COMPLETE", flush=True)
+            return EXIT_NO_CANDIDATE
+
         final = (
             "NO_FAULT_OBSERVED"
             if args.mode == "characterize"
@@ -805,6 +941,8 @@ def main() -> int:
         )
         return EXIT_ERROR
     finally:
+        if output_file is not None:
+            output_file.close()
         if session is not None:
             session.close()
 
