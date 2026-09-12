@@ -14,14 +14,17 @@ printed to stdout.
 
 - Pico `GND` to target `GND`
 - Pico trigger input to JTAG `TCK`
-- Pico `GLITCH` to the rail-side pad of the VDD_LV injection point
+- Pico `GLITCH` SMA center to the VDD_LV pad of C43
+- Pico `GLITCH` SMA shield/ground to the GND pad of C43
 - Pico `RESET` and `VTARGET` disconnected
 - Board independently powered; external FTDI JTAG connected
 - Oscilloscope probes on TCK, Pico `GLITCH`, and an MCU-side VDD_LV point
 
-On the stock discovery board, C43 is on VDD_LV but is not isolated from Q1 or
-the remaining rail capacitance. Do not interpret a campaign until the scope
-shows a repeatable disturbance at the MCU-side measurement point.
+On the stock discovery board, C43 is a non-polarized capacitor between VDD_LV
+and GND; verify its pads by continuity to TP6 and GND with power removed. C43
+is not isolated from Q1 or the remaining rail capacitance. Do not interpret a
+campaign until the scope shows a repeatable disturbance at the MCU-side
+measurement point.
 
 The FTDI probe and Pico must remain powered independently of the target. The
 SPC584B DCI destructive reset has the same password-security effect as a full

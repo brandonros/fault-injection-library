@@ -311,9 +311,11 @@ def read_idcode(session: OpenOCDSession) -> int:
 
 def reset_target(session: OpenOCDSession, hold_ms: int) -> None:
     if session.halted:
+        # Let OpenOCD finish leaving OnCE debug before switching back to raw
+        # JTAGC instructions.  Issuing DCI_CR immediately after resume leaves
+        # the following instruction/data scans misaligned on this target.
         session.command("resume")
-        session.halted = False
-        session.preserve_halt = False
+        time.sleep(0.2)
     session.command(f"irscan spc584b.tap 0x{DCI_CONTROL_INSTRUCTION:02x}")
     session.command(
         f"drscan spc584b.tap 32 0x{DCI_DESTRUCTIVE_RESET:08x}"
@@ -321,6 +323,7 @@ def reset_target(session: OpenOCDSession, hold_ms: int) -> None:
     time.sleep(hold_ms / 1000)
     session.command(f"irscan spc584b.tap 0x{DCI_CONTROL_INSTRUCTION:02x}")
     session.command("drscan spc584b.tap 32 0x00000000")
+    session.command("jtag arp_init")
     session.halted = False
     session.preserve_halt = False
 
@@ -598,7 +601,7 @@ def parse_args() -> argparse.Namespace:
         choices=("default", "alt", "ext1", "ext2"),
     )
     parser.add_argument("--adapter-speed-khz", type=int, default=1000)
-    parser.add_argument("--reset-hold-ms", type=int, default=50)
+    parser.add_argument("--reset-hold-ms", type=int, default=200)
     parser.add_argument(
         "--health-retries",
         type=int,
