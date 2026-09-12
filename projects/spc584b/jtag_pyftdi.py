@@ -65,16 +65,16 @@ class AccessProbe:
     def detail(self) -> str:
         values = ",".join(f"0x{value:08x}" for value in self.lcstats)
         statuses = ",".join(f"0x{value:08x}" for value in self.rwcs)
-        stable = int(bool(self.lcstats) and len(set(self.lcstats)) == 1)
-        valid = int(
+        stable = bool(self.lcstats) and len(set(self.lcstats)) == 1
+        valid = (
             bool(self.lcstats)
             and all(value not in (0, 0xFFFFFFFF) for value in self.lcstats)
             and not any(value & NEXUS_RWCS_ERROR for value in self.rwcs)
         )
-        jun = int(bool(self.lcstats) and bool(self.lcstats[0] & LCSTAT_JUN))
+        jun = stable and valid and bool(self.lcstats[0] & LCSTAT_JUN)
         return (
             f"lcstats={values or 'none'};rwcs={statuses or 'none'};"
-            f"stable={stable};valid={valid};jun={jun};"
+            f"stable={int(stable)};valid={int(valid)};jun={int(jun)};"
             f"transport_error={self.error or 'none'}"
         )
 

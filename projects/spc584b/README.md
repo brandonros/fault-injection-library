@@ -91,9 +91,15 @@ error. The complete raw harness acceptance sequence therefore passes.
 
 ## Characterize the connected crowbar
 
-The previous 20 us test caused a repeatable changed response and recovered with
-the correct password. Repeat that authority check with the raw oracle before
-using its result:
+The raw 20 us authority run on 2026-09-12 changed all five correct-password
+shots from valid LCSTAT data to stable all-ones LCSTAT/RWCS data. Every shot
+then recovered to three stable `LCSTAT=0xe0000002` reads with `JUN=1`. This
+passes the digital authority gate: the connected low-power crowbar reproducibly
+affects the target/JTAG path and the effect is recoverable. It does not identify
+the mechanism; at this width a broad brownout or reset remains the likely
+explanation.
+
+The recorded command was:
 
 ```bash
 .venv/bin/python projects/spc584b/spc584b_password_glitch.py \

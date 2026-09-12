@@ -33,6 +33,11 @@ class RawJtagTests(unittest.TestCase):
         self.assertEqual(probe.state, "NO_VALID_LCSTAT")
         self.assertFalse(probe.access_observed)
 
+    def test_invalid_all_ones_does_not_report_jun(self):
+        probe = self.probe([(0xFFFFFFFF, 0xFFFFFFFF)] * 3)
+        self.assertEqual(probe.state, "NO_VALID_LCSTAT")
+        self.assertIn("valid=0;jun=0", probe.detail)
+
     def test_probe_rejects_unstable_data(self):
         probe = self.probe([(0xE0000002, 0), (0xE0000003, 0), (0xE0000002, 0)])
         self.assertEqual(probe.state, "ACCESS_LCSTAT_UNSTABLE")
