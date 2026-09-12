@@ -28,7 +28,14 @@ control. The current transport drives ACBUS1 low, selects A-to-B direction on
 ACBUS5 for 250 ms, releases the net by selecting B-to-A direction, and then
 resets the TAP. Earlier revisions incorrectly treated ACBUS5 as the reset
 output, so they did not assert PORST. Full cold cycles remain the authoritative
-campaign method until the corrected PORST path passes bench recovery testing.
+method for reproducing any access candidate.
+
+That recovery test then passed on the exact target state left behind by a
+failed pre-fix DCI recovery. Without pressing SW1 or cycling board power, the
+corrected 250 ms FTDI PORST implementation restored IDCODE `0x20144041`,
+correct-password `ACCESS_JUN_SET`, the expected wrong-password zero response,
+and correct-password recovery `ACCESS_JUN_SET`. Programmatic PORST therefore
+replaces manual RESET-button operation for guarded exploratory attack batches.
 
 The code never writes flash, UTEST, DCF, lifecycle, or OTP.
 
